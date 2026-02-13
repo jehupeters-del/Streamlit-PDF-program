@@ -45,10 +45,12 @@ class RegexSearchService:
         return f"{prefix}{normalized}{suffix}"
 
     @staticmethod
-    def _output_name(input_name: str) -> str:
+    def _output_name(input_name: str, pattern: str) -> str:
         stem = Path(input_name).stem
         safe_stem = re.sub(r"[^A-Za-z0-9._() -]", "_", stem).strip() or "output"
-        return f"{safe_stem}_regex_extract.pdf"
+        safe_pattern = re.sub(r"[^A-Za-z0-9._() -]", "_", pattern).strip(" _") or "pattern"
+        safe_pattern = re.sub(r"\s+", "_", safe_pattern)[:40].rstrip("._") or "pattern"
+        return f"{safe_stem}_regex_extract_{safe_pattern}.pdf"
 
     def extract_matching_pages(
         self,
@@ -79,6 +81,7 @@ class RegexSearchService:
                     page_number=index + 1,
                     match_count=len(matches),
                     snippet=self._snippet(text, matches[0]),
+                    matched_text=matches[0].group(0),
                 )
             )
 
@@ -89,7 +92,7 @@ class RegexSearchService:
         output_pdf = self.adapter.build_pdf_from_indices(pdf_bytes, ordered_pages)
 
         return RegexSearchResult(
-            output_name=self._output_name(input_name),
+            output_name=self._output_name(input_name, pattern),
             output_pdf=output_pdf,
             original_pages=len(texts),
             extracted_pages=len(ordered_pages),

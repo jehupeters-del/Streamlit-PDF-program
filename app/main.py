@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import html
+import math
 import re
 
 import streamlit as st
@@ -52,14 +54,17 @@ def _init_state() -> None:
     st.session_state.setdefault("merged_signature", "")
     st.session_state.setdefault("merged_pdf_bytes", b"")
     st.session_state.setdefault("merged_pdf_name", "merged_output.pdf")
+    st.session_state.setdefault("extract_batch_uploader_token", 0)
+    st.session_state.setdefault("validate_batch_uploader_token", 0)
+    st.session_state.setdefault("regex_batch_uploader_token", 0)
 
 
-def _thumbnail_bytes(file_id: str, pdf_bytes: bytes, page_index: int) -> bytes:
-    key = (file_id, page_index)
-    thumbnail_cache: dict[tuple[str, int], bytes] = st.session_state.thumbnail_cache
+def _thumbnail_bytes(file_id: str, pdf_bytes: bytes, page_index: int, zoom: float = 0.38) -> bytes:
+    key = (file_id, page_index, round(zoom, 3))
+    thumbnail_cache: dict[tuple[str, int, float], bytes] = st.session_state.thumbnail_cache
     if key not in thumbnail_cache:
         adapter = PyMuPdfAdapter()
-        thumbnail_cache[key] = adapter.render_page_thumbnail(pdf_bytes, page_index, zoom=0.38)
+        thumbnail_cache[key] = adapter.render_page_thumbnail(pdf_bytes, page_index, zoom=zoom)
     return thumbnail_cache[key]
 
 
@@ -154,7 +159,26 @@ def _validate_upload_limits(config: AppConfig, files: list[tuple[str, bytes]]) -
             raise ValidationError(f"{name} is not a PDF file.")
 
 
-def _render_batch_summary(result: BatchOperationResult) -> None:
+def _highlight_snippet(snippet: str, matched_text: str, case_sensitive: bool) -> str:
+    escaped_full = html.escape(snippet)
+    if not matched_text:
+        return escaped_full
+
+    flags = 0 if case_sensitive else re.IGNORECASE
+    pattern = re.compile(re.escape(matched_text), flags)
+    chunks: list[str] = []
+    last_end = 0
+    for match in pattern.finditer(snippet):
+        chunks.append(html.escape(snippet[last_end : match.start()]))
+        chunks.append(f"<mark>{html.escape(snippet[match.start() : match.end()])}</mark>")
+        last_end = match.end()
+    if not chunks:
+        return escaped_full
+    chunks.append(html.escape(snippet[last_end:]))
+    return "".join(chunks)
+
+
+def _render_batch_summary(result: BatchOperationResult, table_key: str) -> None:
     metric_col_1, metric_col_2, metric_col_3 = st.columns(3)
     metric_col_1.metric("Success", result.success_count)
     metric_col_2.metric("Warning", result.warning_count)
@@ -169,7 +193,40 @@ def _render_batch_summary(result: BatchOperationResult) -> None:
                 "Details": " | ".join(message.text for message in item.messages),
             }
         )
-    st.dataframe(rows, use_container_width=True)
+
+    page_size = 10
+    total_rows = len(rows)
+    if total_rows <= page_size:
+        st.dataframe(rows, use_container_width=True)
+        return
+
+    total_pages = max(1, math.ceil(total_rows / page_size))
+    current_key = f"{table_key}_current_page"
+    st.session_state.setdefault(current_key, 1)
+    current_page = int(st.session_state[current_key])
+    if current_page < 1 or current_page > total_pages:
+        current_page = 1
+        st.session_state[current_key] = 1
+
+    info_col, nav_col = st.columns([3, 2])
+    with info_col:
+        st.caption(f"Showing page {current_page} of {total_pages}")
+    with nav_col:
+        selected_page = st.number_input(
+            "Results page",
+            min_value=1,
+            max_value=total_pages,
+            value=current_page,
+            step=1,
+            key=f"{table_key}_selector",
+        )
+        if int(selected_page) != current_page:
+            st.session_state[current_key] = int(selected_page)
+            st.rerun()
+
+    start = (current_page - 1) * page_size
+    end = start + page_size
+    st.dataframe(rows[start:end], use_container_width=True)
 
 
 def _workspace_tab(
@@ -383,8 +440,11 @@ def _extraction_tab(
             ),
             type=["pdf"],
             accept_multiple_files=True,
-            key="extract_batch",
+            key=f"extract_batch_{st.session_state.extract_batch_uploader_token}",
         )
+        if st.button("Clear All PDFs", key="clear_extract_batch"):
+            st.session_state.extract_batch_uploader_token += 1
+            st.rerun()
         if st.button("Run Batch Extraction"):
             files = (
                 [(item.name, item.getvalue()) for item in uploaded_batch] if uploaded_batch else []
@@ -397,7 +457,7 @@ def _extraction_tab(
                 progress = st.progress(0)
                 batch_result = batch_service.run_extraction_batch(files)
                 progress.progress(100)
-                _render_batch_summary(batch_result)
+                _render_batch_summary(batch_result, table_key="extract_batch_summary")
                 zip_name, zip_bytes = batch_service.build_zip(batch_result)
                 st.download_button(
                     "Download Batch ZIP",
@@ -456,8 +516,11 @@ def _validation_tab(
             ),
             type=["pdf"],
             accept_multiple_files=True,
-            key="validate_batch",
+            key=f"validate_batch_{st.session_state.validate_batch_uploader_token}",
         )
+        if st.button("Clear All PDFs", key="clear_validate_batch"):
+            st.session_state.validate_batch_uploader_token += 1
+            st.rerun()
         if st.button("Run Batch Validation"):
             files = (
                 [(item.name, item.getvalue()) for item in uploaded_batch] if uploaded_batch else []
@@ -470,7 +533,7 @@ def _validation_tab(
                 progress = st.progress(0)
                 batch_result = batch_service.run_validation_batch(files)
                 progress.progress(100)
-                _render_batch_summary(batch_result)
+                _render_batch_summary(batch_result, table_key="validate_batch_summary")
 
                 csv_name, csv_bytes = batch_service.build_validation_csv(batch_result)
                 txt_name, txt_summary = batch_service.build_validation_text_summary(batch_result)
@@ -511,15 +574,12 @@ def _regex_extract_tab(
         placeholder=r"Example: solution\.",
         key="regex_pattern",
     )
-    option_col_1, option_col_2 = st.columns(2)
-    with option_col_1:
-        case_sensitive = st.checkbox("Case-sensitive", key="regex_case_sensitive", value=False)
-    with option_col_2:
-        keep_first_page = st.checkbox(
-            "Keep first page in output",
-            key="regex_keep_first_page",
-            value=True,
-        )
+    case_sensitive = st.checkbox("Case-sensitive", key="regex_case_sensitive", value=False)
+    keep_first_page = st.checkbox(
+        "Keep first page in output",
+        key="regex_keep_first_page",
+        value=True,
+    )
 
     if mode == "Single":
         uploaded_single = st.file_uploader(
@@ -556,6 +616,7 @@ def _regex_extract_tab(
                 stat_col_3.metric("Extracted pages", result.extracted_pages)
 
                 if result.matches:
+                    st.markdown("**Matched pages with highlighted snippets**")
                     st.dataframe(
                         [
                             {
@@ -567,6 +628,22 @@ def _regex_extract_tab(
                         ],
                         use_container_width=True,
                     )
+
+                    for item in result.matches:
+                        st.markdown(f"**Page {item.page_number}** ({item.match_count} matches)")
+                        preview = _thumbnail_bytes(
+                            file_id=f"regex_preview::{uploaded_single.name}",
+                            pdf_bytes=content,
+                            page_index=item.page_number - 1,
+                            zoom=0.72,
+                        )
+                        st.image(preview, use_container_width=True)
+                        highlighted = _highlight_snippet(
+                            item.snippet,
+                            item.matched_text,
+                            case_sensitive,
+                        )
+                        st.markdown(f"Snippet: {highlighted}", unsafe_allow_html=True)
                 elif keep_first_page:
                     st.info("No page matched regex. Output includes first page only.")
             except Exception as exc:
@@ -580,8 +657,11 @@ def _regex_extract_tab(
             ),
             type=["pdf"],
             accept_multiple_files=True,
-            key="regex_batch",
+            key=f"regex_batch_{st.session_state.regex_batch_uploader_token}",
         )
+        if st.button("Clear All PDFs", key="clear_regex_batch"):
+            st.session_state.regex_batch_uploader_token += 1
+            st.rerun()
         if st.button("Run Batch Regex Extraction", type="primary"):
             files = (
                 [(item.name, item.getvalue()) for item in uploaded_batch] if uploaded_batch else []
@@ -597,7 +677,7 @@ def _regex_extract_tab(
                     case_sensitive=case_sensitive,
                     keep_first_page=keep_first_page,
                 )
-                _render_batch_summary(batch_result)
+                _render_batch_summary(batch_result, table_key="regex_batch_summary")
                 zip_name, zip_bytes = batch_service.build_zip(
                     batch_result,
                     zip_name="regex_batch_outputs.zip",

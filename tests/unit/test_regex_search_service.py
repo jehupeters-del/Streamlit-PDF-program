@@ -22,6 +22,8 @@ def test_regex_single_extract_matches_pages(synthetic_pdf_bytes: bytes) -> None:
     assert result.matched_pages == [2, 3]
     assert result.extracted_pages == 3
     assert adapter.get_page_count(result.output_pdf) == 3
+    assert result.output_name.endswith("_regex_extract_question.pdf")
+    assert result.matches[0].matched_text.lower() == "question"
 
 
 @pytest.mark.unit

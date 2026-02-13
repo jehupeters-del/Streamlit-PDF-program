@@ -70,6 +70,7 @@ class RegexPageMatch:
     page_number: int
     match_count: int
     snippet: str
+    matched_text: str
 
 
 @dataclass(frozen=True)
