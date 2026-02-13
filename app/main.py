@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import base64
+import os
+import pickle
 import re
+import tempfile
+from typing import Any
 
 import streamlit as st
 
 from src.adapters.pymupdf_adapter import PyMuPdfAdapter
 from src.domain.errors import ValidationError
-from src.domain.models import BatchOperationResult, PageRef, WorkspaceFile
+from src.domain.models import BatchItemResult, BatchOperationResult, PageRef, WorkspaceFile
 from src.infrastructure.config import AppConfig
 from src.services.batch_service import BatchService
 from src.services.extraction_service import ExtractionService
@@ -64,6 +68,22 @@ def _init_state() -> None:
     st.session_state.setdefault("active_main_tab", "Edit & Merge")
     st.session_state.setdefault("main_nav_selector", "Edit & Merge")
     st.session_state.setdefault("pending_main_tab", "")
+    st.session_state.setdefault("workspace_undo_stack", [])
+    st.session_state.setdefault("workspace_redo_stack", [])
+    st.session_state.setdefault("workspace_restore_checked", False)
+    st.session_state.setdefault(
+        "workspace_snapshot_path",
+        os.path.join(tempfile.gettempdir(), "pdf_suite_workspace_snapshot.pkl"),
+    )
+    st.session_state.setdefault("extract_batch_job", None)
+    st.session_state.setdefault("validate_batch_job", None)
+    st.session_state.setdefault("regex_batch_job", None)
+    st.session_state.setdefault("extract_batch_last_files", [])
+    st.session_state.setdefault("extract_batch_last_result", None)
+    st.session_state.setdefault("validate_batch_last_files", [])
+    st.session_state.setdefault("validate_batch_last_result", None)
+    st.session_state.setdefault("regex_batch_last_files", [])
+    st.session_state.setdefault("regex_batch_last_result", None)
 
 
 def _thumbnail_bytes(
@@ -181,6 +201,97 @@ def _render_batch_summary(result: BatchOperationResult) -> None:
     st.dataframe(rows, use_container_width=True)
 
 
+def _snapshot_workspace_state() -> dict[str, Any]:
+    return {
+        "workspace_files": list(st.session_state.workspace_files),
+        "page_refs": list(st.session_state.page_refs),
+    }
+
+
+def _apply_workspace_state(snapshot: dict[str, Any]) -> None:
+    st.session_state.workspace_files = list(snapshot.get("workspace_files", []))
+    st.session_state.page_refs = list(snapshot.get("page_refs", []))
+    st.session_state.thumbnail_cache = {}
+    st.session_state.merged_signature = ""
+    st.session_state.merged_pdf_bytes = b""
+    st.session_state.merged_pdf_name = "merged_output.pdf"
+
+
+def _push_workspace_undo() -> None:
+    undo_stack: list[dict[str, Any]] = st.session_state.workspace_undo_stack
+    undo_stack.append(_snapshot_workspace_state())
+    if len(undo_stack) > 50:
+        del undo_stack[0]
+    st.session_state.workspace_undo_stack = undo_stack
+    st.session_state.workspace_redo_stack = []
+
+
+def _persist_workspace_snapshot() -> None:
+    path = st.session_state.workspace_snapshot_path
+    payload = _snapshot_workspace_state()
+    with open(path, "wb") as handle:
+        pickle.dump(payload, handle)
+
+
+def _clear_workspace_snapshot() -> None:
+    path = st.session_state.workspace_snapshot_path
+    if os.path.exists(path):
+        os.remove(path)
+
+
+def _restore_workspace_snapshot() -> bool:
+    path = st.session_state.workspace_snapshot_path
+    if not os.path.exists(path):
+        return False
+    with open(path, "rb") as handle:
+        snapshot = pickle.load(handle)
+    _apply_workspace_state(snapshot)
+    return True
+
+
+def _start_batch_job(
+    job_key: str,
+    files: list[tuple[str, bytes]],
+    options: dict[str, Any] | None = None,
+) -> None:
+    st.session_state[job_key] = {
+        "source_files": list(files),
+        "pending": list(files),
+        "items": [],
+        "processed": 0,
+        "total": len(files),
+        "cancel_requested": False,
+        "options": options or {},
+    }
+
+
+def _render_batch_retry_actions(
+    feature_label: str,
+    files: list[tuple[str, bytes]],
+    result: BatchOperationResult,
+    retry_button_key: str,
+) -> list[tuple[str, bytes]] | None:
+    retry_candidates = [
+        item.source_name for item in result.items if item.status.value in {"warning", "error"}
+    ]
+    if not retry_candidates:
+        return None
+
+    st.caption(f"Retry failed/warning {feature_label} files")
+    selected_names = st.multiselect(
+        "Select files to retry",
+        options=retry_candidates,
+        key=f"{retry_button_key}_select",
+    )
+    if st.button("Retry Selected", key=retry_button_key):
+        if not selected_names:
+            st.warning("Select at least one file to retry.")
+            return None
+        selected_set = set(selected_names)
+        return [file for file in files if file[0] in selected_set]
+    return None
+
+
 def _workspace_tab(
     config: AppConfig,
     workspace_service: WorkspaceService,
@@ -188,6 +299,11 @@ def _workspace_tab(
 ) -> None:
     st.subheader("Edit and Merge PDFs", anchor=False)
     st.caption("Review all loaded PDFs below, remove unwanted pages, then merge.")
+
+    if not st.session_state.workspace_restore_checked:
+        st.session_state.workspace_restore_checked = True
+        if not st.session_state.workspace_files and _restore_workspace_snapshot():
+            st.info("Restored previous workspace.")
 
     uploaded = st.file_uploader(
         (
@@ -205,18 +321,52 @@ def _workspace_tab(
             files = [(item.name, item.getvalue()) for item in uploaded] if uploaded else []
             loaded = workspace_service.load_files(files)
             if loaded:
+                _push_workspace_undo()
                 st.session_state.workspace_files.extend(loaded)
                 st.session_state.page_refs.extend(workspace_service.initial_page_refs(loaded))
+                _persist_workspace_snapshot()
                 st.success(f"Loaded {len(loaded)} PDF(s).")
         except Exception as exc:
             st.error(str(exc))
 
-    col_reset, col_limits = st.columns([1, 2])
+    col_undo, col_redo, col_reset, col_limits = st.columns([1, 1, 1, 2])
+    with col_undo:
+        if st.button(
+            "Undo",
+            disabled=not st.session_state.workspace_undo_stack,
+            use_container_width=True,
+        ):
+            undo_stack: list[dict[str, Any]] = st.session_state.workspace_undo_stack
+            redo_stack: list[dict[str, Any]] = st.session_state.workspace_redo_stack
+            redo_stack.append(_snapshot_workspace_state())
+            snapshot = undo_stack.pop()
+            st.session_state.workspace_undo_stack = undo_stack
+            st.session_state.workspace_redo_stack = redo_stack
+            _apply_workspace_state(snapshot)
+            _persist_workspace_snapshot()
+            st.rerun()
+    with col_redo:
+        if st.button(
+            "Redo",
+            disabled=not st.session_state.workspace_redo_stack,
+            use_container_width=True,
+        ):
+            undo_stack = st.session_state.workspace_undo_stack
+            redo_stack = st.session_state.workspace_redo_stack
+            undo_stack.append(_snapshot_workspace_state())
+            snapshot = redo_stack.pop()
+            st.session_state.workspace_undo_stack = undo_stack
+            st.session_state.workspace_redo_stack = redo_stack
+            _apply_workspace_state(snapshot)
+            _persist_workspace_snapshot()
+            st.rerun()
     with col_reset:
         if st.button("New (Reset Workspace)"):
+            _push_workspace_undo()
             st.session_state.workspace_files = []
             st.session_state.page_refs = []
             st.session_state.thumbnail_cache = {}
+            _clear_workspace_snapshot()
             st.success("Workspace reset.")
     with col_limits:
         st.caption(
@@ -242,6 +392,7 @@ def _workspace_tab(
             f"({retained_counts.get(workspace_file.file_id, 0)} pages retained)"
         )
         if st.button("Remove PDF", key=f"remove_pdf_{workspace_file.file_id}"):
+            _push_workspace_undo()
             new_files, new_refs = workspace_service.remove_file(
                 workspace_files,
                 page_refs,
@@ -254,6 +405,7 @@ def _workspace_tab(
                 for key, value in st.session_state.thumbnail_cache.items()
                 if key[0] != workspace_file.file_id
             }
+            _persist_workspace_snapshot()
             st.rerun()
 
         if not file_refs:
@@ -277,11 +429,13 @@ def _workspace_tab(
                     key=f"remove_single_{workspace_file.file_id}_{ref.page_index}",
                     use_container_width=True,
                 ):
+                    _push_workspace_undo()
                     st.session_state.page_refs = workspace_service.remove_single_page(
                         st.session_state.page_refs,
                         workspace_file.file_id,
                         ref.page_index,
                     )
+                    _persist_workspace_snapshot()
                     st.rerun()
 
         with st.form(key=f"remove_multi_form_{workspace_file.file_id}"):
@@ -299,11 +453,13 @@ def _workspace_tab(
                 else:
                     selected_refs = [file_refs[page - 1] for page in selected_pages]
                     page_indices = [item.page_index for item in selected_refs]
+                    _push_workspace_undo()
                     st.session_state.page_refs = workspace_service.remove_multiple_pages(
                         st.session_state.page_refs,
                         workspace_file.file_id,
                         page_indices,
                     )
+                    _persist_workspace_snapshot()
                     st.success(f"Removed {len(page_indices)} page(s).")
                     st.rerun()
         st.divider()
@@ -406,19 +562,57 @@ def _extraction_tab(
                 return
             try:
                 _validate_upload_limits(config, files)
-                progress = st.progress(0)
-                batch_result = batch_service.run_extraction_batch(files)
-                progress.progress(100)
-                _render_batch_summary(batch_result)
-                zip_name, zip_bytes = batch_service.build_zip(batch_result)
-                st.download_button(
-                    "Download Batch ZIP",
-                    data=zip_bytes,
-                    file_name=zip_name,
-                    mime="application/zip",
-                )
+                _start_batch_job("extract_batch_job", files)
+                st.rerun()
             except Exception as exc:
                 st.error(str(exc))
+
+        extract_job = st.session_state.extract_batch_job
+        if extract_job:
+            progress_value = int((extract_job["processed"] / max(1, extract_job["total"])) * 100)
+            st.progress(progress_value)
+            st.caption(f"Processing {extract_job['processed']} of {extract_job['total']} files")
+            if st.button("Cancel Batch Run", key="cancel_extract_batch_run"):
+                extract_job["cancel_requested"] = True
+                st.session_state.extract_batch_job = extract_job
+                st.rerun()
+
+            if extract_job["pending"] and not extract_job["cancel_requested"]:
+                current_file = extract_job["pending"].pop(0)
+                item = batch_service.run_extraction_batch([current_file]).items[0]
+                extract_job["items"].append(item)
+                extract_job["processed"] += 1
+                st.session_state.extract_batch_job = extract_job
+                st.rerun()
+
+            batch_result = BatchOperationResult(items=extract_job["items"])
+            st.session_state.extract_batch_last_files = extract_job["source_files"]
+            st.session_state.extract_batch_last_result = batch_result
+            st.session_state.extract_batch_job = None
+
+            if extract_job["cancel_requested"] and extract_job["pending"]:
+                st.warning("Batch run cancelled. Partial results shown below.")
+
+        if st.session_state.extract_batch_last_result is not None:
+            last_result: BatchOperationResult = st.session_state.extract_batch_last_result
+            _render_batch_summary(last_result)
+            zip_name, zip_bytes = batch_service.build_zip(last_result)
+            st.download_button(
+                "Download Batch ZIP",
+                data=zip_bytes,
+                file_name=zip_name,
+                mime="application/zip",
+            )
+
+            retry_files = _render_batch_retry_actions(
+                "extraction",
+                st.session_state.extract_batch_last_files,
+                last_result,
+                retry_button_key="retry_extract_batch",
+            )
+            if retry_files:
+                _start_batch_job("extract_batch_job", retry_files)
+                st.rerun()
 
 
 def _validation_tab(
@@ -483,34 +677,72 @@ def _validation_tab(
                 return
             try:
                 _validate_upload_limits(config, files)
-                progress = st.progress(0)
-                batch_result = batch_service.run_validation_batch(files)
-                progress.progress(100)
-                _render_batch_summary(batch_result)
-
-                csv_name, csv_bytes = batch_service.build_validation_csv(batch_result)
-                txt_name, txt_summary = batch_service.build_validation_text_summary(batch_result)
-
-                st.download_button(
-                    "Download Validation CSV",
-                    data=csv_bytes,
-                    file_name=csv_name,
-                    mime="text/csv",
-                )
-                st.download_button(
-                    "Download Validation TXT",
-                    data=txt_summary,
-                    file_name=txt_name,
-                    mime="text/plain",
-                )
-                st.text_area(
-                    "Copy-ready validation summary",
-                    value=txt_summary,
-                    height=220,
-                    key="validation_copy_summary",
-                )
+                _start_batch_job("validate_batch_job", files)
+                st.rerun()
             except Exception as exc:
                 st.error(str(exc))
+
+        validate_job = st.session_state.validate_batch_job
+        if validate_job:
+            progress_value = int((validate_job["processed"] / max(1, validate_job["total"])) * 100)
+            st.progress(progress_value)
+            st.caption(f"Processing {validate_job['processed']} of {validate_job['total']} files")
+            if st.button("Cancel Batch Run", key="cancel_validate_batch_run"):
+                validate_job["cancel_requested"] = True
+                st.session_state.validate_batch_job = validate_job
+                st.rerun()
+
+            if validate_job["pending"] and not validate_job["cancel_requested"]:
+                current_file = validate_job["pending"].pop(0)
+                item = batch_service.run_validation_batch([current_file]).items[0]
+                validate_job["items"].append(item)
+                validate_job["processed"] += 1
+                st.session_state.validate_batch_job = validate_job
+                st.rerun()
+
+            batch_result = BatchOperationResult(items=validate_job["items"])
+            st.session_state.validate_batch_last_files = validate_job["source_files"]
+            st.session_state.validate_batch_last_result = batch_result
+            st.session_state.validate_batch_job = None
+
+            if validate_job["cancel_requested"] and validate_job["pending"]:
+                st.warning("Batch run cancelled. Partial results shown below.")
+
+        if st.session_state.validate_batch_last_result is not None:
+            last_result: BatchOperationResult = st.session_state.validate_batch_last_result
+            _render_batch_summary(last_result)
+
+            csv_name, csv_bytes = batch_service.build_validation_csv(last_result)
+            txt_name, txt_summary = batch_service.build_validation_text_summary(last_result)
+
+            st.download_button(
+                "Download Validation CSV",
+                data=csv_bytes,
+                file_name=csv_name,
+                mime="text/csv",
+            )
+            st.download_button(
+                "Download Validation TXT",
+                data=txt_summary,
+                file_name=txt_name,
+                mime="text/plain",
+            )
+            st.text_area(
+                "Copy-ready validation summary",
+                value=txt_summary,
+                height=220,
+                key="validation_copy_summary",
+            )
+
+            retry_files = _render_batch_retry_actions(
+                "validation",
+                st.session_state.validate_batch_last_files,
+                last_result,
+                retry_button_key="retry_validate_batch",
+            )
+            if retry_files:
+                _start_batch_job("validate_batch_job", retry_files)
+                st.rerun()
 
 
 def _regex_extract_tab(
@@ -665,26 +897,82 @@ def _regex_extract_tab(
                 return
             try:
                 _validate_upload_limits(config, files)
-                batch_result = regex_search_service.run_batch_extraction(
-                    files=files,
-                    pattern=pattern,
-                    case_sensitive=case_sensitive,
-                    keep_first_page=keep_first_page,
+                _start_batch_job(
+                    "regex_batch_job",
+                    files,
+                    options={
+                        "pattern": pattern,
+                        "case_sensitive": case_sensitive,
+                        "keep_first_page": keep_first_page,
+                    },
                 )
-                _render_batch_summary(batch_result)
-                zip_name, zip_bytes = batch_service.build_zip(
-                    batch_result,
-                    zip_name="regex_batch_outputs.zip",
-                )
-                st.download_button(
-                    "Download Batch ZIP",
-                    data=zip_bytes,
-                    file_name=zip_name,
-                    mime="application/zip",
-                    type="primary",
-                )
+                st.rerun()
             except Exception as exc:
                 st.error(str(exc))
+
+        regex_job = st.session_state.regex_batch_job
+        if regex_job:
+            progress_value = int((regex_job["processed"] / max(1, regex_job["total"])) * 100)
+            st.progress(progress_value)
+            st.caption(f"Processing {regex_job['processed']} of {regex_job['total']} files")
+            if st.button("Cancel Batch Run", key="cancel_regex_batch_run"):
+                regex_job["cancel_requested"] = True
+                st.session_state.regex_batch_job = regex_job
+                st.rerun()
+
+            if regex_job["pending"] and not regex_job["cancel_requested"]:
+                current_file = regex_job["pending"].pop(0)
+                batch_item = regex_search_service.run_batch_extraction(
+                    files=[current_file],
+                    pattern=regex_job["options"]["pattern"],
+                    case_sensitive=regex_job["options"]["case_sensitive"],
+                    keep_first_page=regex_job["options"]["keep_first_page"],
+                ).items[0]
+                regex_job["items"].append(batch_item)
+                regex_job["processed"] += 1
+                st.session_state.regex_batch_job = regex_job
+                st.rerun()
+
+            batch_result = BatchOperationResult(items=regex_job["items"])
+            st.session_state.regex_batch_last_files = regex_job["source_files"]
+            st.session_state.regex_batch_last_result = batch_result
+            st.session_state.regex_batch_job = None
+
+            if regex_job["cancel_requested"] and regex_job["pending"]:
+                st.warning("Batch run cancelled. Partial results shown below.")
+
+        if st.session_state.regex_batch_last_result is not None:
+            last_result: BatchOperationResult = st.session_state.regex_batch_last_result
+            _render_batch_summary(last_result)
+            zip_name, zip_bytes = batch_service.build_zip(
+                last_result,
+                zip_name="regex_batch_outputs.zip",
+            )
+            st.download_button(
+                "Download Batch ZIP",
+                data=zip_bytes,
+                file_name=zip_name,
+                mime="application/zip",
+                type="primary",
+            )
+
+            retry_files = _render_batch_retry_actions(
+                "regex extraction",
+                st.session_state.regex_batch_last_files,
+                last_result,
+                retry_button_key="retry_regex_batch",
+            )
+            if retry_files:
+                _start_batch_job(
+                    "regex_batch_job",
+                    retry_files,
+                    options={
+                        "pattern": pattern,
+                        "case_sensitive": case_sensitive,
+                        "keep_first_page": keep_first_page,
+                    },
+                )
+                st.rerun()
 
 
 def main() -> None:
