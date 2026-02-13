@@ -57,9 +57,12 @@ def _init_state() -> None:
     st.session_state.setdefault("regex_batch_uploader_token", 0)
     st.session_state.setdefault("regex_last_result_name", "")
     st.session_state.setdefault("regex_last_result_bytes", b"")
+    st.session_state.setdefault("active_main_tab", "Edit & Merge")
+    st.session_state.setdefault("main_nav_selector", "Edit & Merge")
+    st.session_state.setdefault("pending_main_tab", "")
 
 
-def _thumbnail_bytes(file_id: str, pdf_bytes: bytes, page_index: int, zoom: float = 0.42) -> bytes:
+def _thumbnail_bytes(file_id: str, pdf_bytes: bytes, page_index: int, zoom: float = 0.46) -> bytes:
     key = (file_id, page_index, round(zoom, 3))
     thumbnail_cache: dict[tuple[str, int, float], bytes] = st.session_state.thumbnail_cache
     if key not in thumbnail_cache:
@@ -594,7 +597,7 @@ def _regex_extract_tab(
                                 pdf_bytes=content,
                                 page_index=item.page_number - 1,
                                 search_terms=[item.matched_text],
-                                zoom=0.42,
+                                zoom=0.46,
                             )
                             st.markdown(
                                 _thumbnail_html(preview, item.page_number),
@@ -630,7 +633,7 @@ def _regex_extract_tab(
                 st.session_state.merged_signature = ""
                 st.session_state.merged_pdf_bytes = b""
                 st.session_state.merged_pdf_name = "merged_output.pdf"
-                st.session_state.active_main_tab = "Edit & Merge"
+                st.session_state.pending_main_tab = "Edit & Merge"
                 st.success("Loaded result into Edit & Merge workspace.")
                 st.rerun()
             except Exception as exc:
@@ -700,17 +703,26 @@ def main() -> None:
     _init_state()
 
     tab_options = ["Edit & Merge", "Extract Questions", "Validate Questions", "Regex Extract"]
-    st.session_state.setdefault("active_main_tab", "Edit & Merge")
     if st.session_state.active_main_tab not in tab_options:
         st.session_state.active_main_tab = "Edit & Merge"
+    if st.session_state.main_nav_selector not in tab_options:
+        st.session_state.main_nav_selector = st.session_state.active_main_tab
+
+    requested_tab = st.session_state.pending_main_tab
+    if requested_tab in tab_options:
+        st.session_state.active_main_tab = requested_tab
+        st.session_state.main_nav_selector = requested_tab
+        st.session_state.pending_main_tab = ""
 
     selected_tab = st.radio(
         "Section",
         options=tab_options,
         horizontal=True,
-        key="active_main_tab",
+        key="main_nav_selector",
         label_visibility="collapsed",
     )
+    if selected_tab != st.session_state.active_main_tab:
+        st.session_state.active_main_tab = selected_tab
 
     if selected_tab == "Edit & Merge":
         _workspace_tab(config, workspace_service, merge_service)
