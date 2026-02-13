@@ -62,7 +62,7 @@ def _init_state() -> None:
     st.session_state.setdefault("pending_main_tab", "")
 
 
-def _thumbnail_bytes(file_id: str, pdf_bytes: bytes, page_index: int, zoom: float = 0.46) -> bytes:
+def _thumbnail_bytes(file_id: str, pdf_bytes: bytes, page_index: int, zoom: float = 0.42) -> bytes:
     key = (file_id, page_index, round(zoom, 3))
     thumbnail_cache: dict[tuple[str, int, float], bytes] = st.session_state.thumbnail_cache
     if key not in thumbnail_cache:
@@ -597,7 +597,7 @@ def _regex_extract_tab(
                                 pdf_bytes=content,
                                 page_index=item.page_number - 1,
                                 search_terms=[item.matched_text],
-                                zoom=0.46,
+                                zoom=0.42,
                             )
                             st.markdown(
                                 _thumbnail_html(preview, item.page_number),
