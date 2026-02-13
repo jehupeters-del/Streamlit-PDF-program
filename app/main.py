@@ -17,6 +17,10 @@ from src.services.validation_service import ValidationService
 from src.services.workspace_service import WorkspaceService
 
 
+THUMBNAIL_DISPLAY_ZOOM = 0.38
+THUMBNAIL_COLUMNS = 4
+
+
 def _init_services() -> tuple[
     AppConfig,
     WorkspaceService,
@@ -62,7 +66,12 @@ def _init_state() -> None:
     st.session_state.setdefault("pending_main_tab", "")
 
 
-def _thumbnail_bytes(file_id: str, pdf_bytes: bytes, page_index: int, zoom: float = 0.42) -> bytes:
+def _thumbnail_bytes(
+    file_id: str,
+    pdf_bytes: bytes,
+    page_index: int,
+    zoom: float = THUMBNAIL_DISPLAY_ZOOM,
+) -> bytes:
     key = (file_id, page_index, round(zoom, 3))
     thumbnail_cache: dict[tuple[str, int, float], bytes] = st.session_state.thumbnail_cache
     if key not in thumbnail_cache:
@@ -127,17 +136,8 @@ def _merge_signature(workspace_files: list[WorkspaceFile], page_refs: list[PageR
 
 
 def _auto_thumbnail_columns(page_count: int) -> int:
-    if page_count <= 1:
-        return 1
-    if page_count <= 4:
-        return 2
-    if page_count <= 9:
-        return 3
-    if page_count <= 16:
-        return 4
-    if page_count <= 25:
-        return 5
-    return 6
+    _ = page_count
+    return THUMBNAIL_COLUMNS
 
 
 def _file_map(files: list[WorkspaceFile]) -> dict[str, WorkspaceFile]:
@@ -590,14 +590,14 @@ def _regex_extract_tab(
                     )
 
                     preview_adapter = PyMuPdfAdapter()
-                    preview_columns = st.columns(4, gap="small")
+                    preview_columns = st.columns(THUMBNAIL_COLUMNS, gap="small")
                     for index, item in enumerate(result.matches):
                         with preview_columns[index % 4]:
                             preview = preview_adapter.render_page_thumbnail_with_highlights(
                                 pdf_bytes=content,
                                 page_index=item.page_number - 1,
                                 search_terms=[item.matched_text],
-                                zoom=0.42,
+                                zoom=THUMBNAIL_DISPLAY_ZOOM,
                             )
                             st.markdown(
                                 _thumbnail_html(preview, item.page_number),
