@@ -43,3 +43,6 @@ temp/
 # PDF outputs
 outputs/
 artifacts/
+
+# Local test data
+data/

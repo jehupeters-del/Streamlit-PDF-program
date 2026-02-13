@@ -124,7 +124,9 @@ def _workspace_tab(
             st.success("Workspace reset.")
     with col_limits:
         st.caption(
-            f"Upload limits: {config.max_pdf_size_mb} MB per PDF, {config.max_batch_size_mb} MB per batch"
+            "Upload limits: "
+            f"{config.max_pdf_size_mb} MB per PDF, "
+            f"{config.max_batch_size_mb} MB per batch"
         )
 
     workspace_files: list[WorkspaceFile] = st.session_state.workspace_files
@@ -163,11 +165,11 @@ def _workspace_tab(
         st.warning("No retained pages in this document.")
     else:
         st.write("### Thumbnails")
-        cols = st.columns(3)
+        cols = st.columns(4)
         for index, ref in enumerate(selected_refs):
-            with cols[index % 3]:
+            with cols[index % 4]:
                 thumbnail = adapter.render_page_thumbnail(selected_file.content, ref.page_index)
-                st.image(thumbnail, caption=f"Page {ref.page_index + 1}", use_container_width=True)
+                st.image(thumbnail, caption=f"Page {ref.page_index + 1}", width=170)
                 if st.button(
                     f"Remove Page {ref.page_index + 1}",
                     key=f"remove_single_{selected_file_id}_{ref.page_index}",
@@ -236,16 +238,20 @@ def _extraction_tab(
                     file_name=single_result.output_name,
                     mime="application/pdf",
                 )
-                st.json(
-                    {
-                        "source": uploaded_single.name,
-                        "output": single_result.output_name,
-                        "original_pages": single_result.original_pages,
-                        "extracted_pages": single_result.extracted_pages,
-                        "found_questions": single_result.found_questions,
-                        "validation": asdict(single_result.validation),
-                    }
-                )
+                st.success("Extraction complete")
+                stat_col_1, stat_col_2, stat_col_3 = st.columns(3)
+                stat_col_1.metric("Original pages", single_result.original_pages)
+                stat_col_2.metric("Extracted pages", single_result.extracted_pages)
+                stat_col_3.metric("Questions found", len(single_result.found_questions))
+                st.markdown(f"**Output file:** {single_result.output_name}")
+                if single_result.validation.max_question == 0:
+                    st.info("No questions found in document (valid by rule).")
+                elif single_result.validation.is_valid:
+                    st.success("Question sequence is complete.")
+                else:
+                    st.warning(
+                        "Missing questions: " f"{single_result.validation.missing_questions}"
+                    )
             except Exception as exc:
                 st.error(str(exc))
     else:

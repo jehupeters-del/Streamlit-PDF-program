@@ -149,7 +149,12 @@ class BatchService:
         lines: list[str] = []
         lines.append("Validation Batch Summary")
         lines.append(
-            f"success={result.success_count} warning={result.warning_count} error={result.error_count}"
+            "success="
+            f"{result.success_count} "
+            "warning="
+            f"{result.warning_count} "
+            "error="
+            f"{result.error_count}"
         )
         lines.append("")
         for item in result.items:

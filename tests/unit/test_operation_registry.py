@@ -6,8 +6,8 @@ from src.domain.models import (
     OperationMessage,
     OperationResult,
     Status,
+    WorkspaceFile,
 )
-from src.domain.models import WorkspaceFile
 from src.services.operation_registry import OperationRegistry
 
 

@@ -25,7 +25,7 @@ Streamlit-first rebuild of the legacy desktop PDF workflow with production-orien
    - `streamlit run streamlit_app.py`
 
 ## Test and quality checks
-- `ruff check .`
+- `flake8 app src tests`
 - `black --check .`
 - `mypy src app`
 - `pytest`

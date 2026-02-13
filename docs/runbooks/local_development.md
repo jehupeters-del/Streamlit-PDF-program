@@ -9,7 +9,7 @@
 - `streamlit run streamlit_app.py`
 
 ## Run quality checks
-- `ruff check .`
+- `flake8 app src tests`
 - `black --check .`
 - `mypy src app`
 - `pytest`

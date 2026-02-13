@@ -23,6 +23,12 @@ def synthetic_pdf_bytes() -> bytes:
 
 @pytest.fixture
 def real_world_fixture_paths() -> list[Path]:
+    local_data_dir = Path(__file__).resolve().parent.parent / "data"
+    if local_data_dir.exists():
+        local_data_pdfs = sorted(local_data_dir.glob("*.pdf"))
+        if local_data_pdfs:
+            return local_data_pdfs
+
     base = Path(__file__).parent / "fixtures" / "real_world"
     base.mkdir(parents=True, exist_ok=True)
 

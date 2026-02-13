@@ -15,7 +15,7 @@
 - Keep Streamlit UX in `app`.
 
 ## Required checks before PR
-- `ruff check .`
+- `flake8 app src tests`
 - `black --check .`
 - `mypy src app`
 - `pytest`

@@ -37,3 +37,14 @@ def test_infer_smart_output_name_month_year() -> None:
 @pytest.mark.unit
 def test_infer_smart_output_name_fallback() -> None:
     assert infer_smart_output_name("worksheet.pdf") == "worksheet_solutions.pdf"
+
+
+@pytest.mark.unit
+def test_infer_smart_output_name_abbrev_and_two_digit_year() -> None:
+    assert infer_smart_output_name("pc_mg_jan_19.pdf") == "January 2019 solutions.pdf"
+    assert infer_smart_output_name("pc_mg_jun_19.pdf") == "June 2019 solutions.pdf"
+
+
+@pytest.mark.unit
+def test_infer_smart_output_name_compact_month_year() -> None:
+    assert infer_smart_output_name("pcmgjan19.pdf") == "January 2019 solutions.pdf"
