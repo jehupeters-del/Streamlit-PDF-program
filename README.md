@@ -24,6 +24,12 @@ Streamlit-first rebuild of the legacy desktop PDF workflow with production-orien
 3. Run app:
    - `streamlit run streamlit_app.py`
 
+## Launch locally anytime
+- Default launch:
+   - `streamlit run streamlit_app.py`
+- Explicit host/port launch:
+   - `python -m streamlit run streamlit_app.py --server.headless true --server.port 8501`
+
 ## Test and quality checks
 - `flake8 app src tests`
 - `black --check .`

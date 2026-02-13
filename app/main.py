@@ -13,11 +13,6 @@ from src.services.validation_service import ValidationService
 from src.services.workspace_service import WorkspaceService
 
 
-@st.dialog("Page Preview")
-def _page_preview_dialog(preview_image: bytes, page_label: str) -> None:
-    st.image(preview_image, caption=page_label, use_container_width=True)
-
-
 def _init_services() -> tuple[
     AppConfig,
     WorkspaceService,
@@ -48,8 +43,12 @@ def _init_services() -> tuple[
 def _init_state() -> None:
     st.session_state.setdefault("workspace_files", [])
     st.session_state.setdefault("page_refs", [])
-    st.session_state.setdefault("preview_image", None)
-    st.session_state.setdefault("preview_label", "")
+
+
+@st.cache_data(show_spinner=False)
+def _thumbnail_bytes(pdf_bytes: bytes, page_index: int) -> bytes:
+    adapter = PyMuPdfAdapter()
+    return adapter.render_page_thumbnail(pdf_bytes, page_index, zoom=0.38)
 
 
 def _file_map(files: list[WorkspaceFile]) -> dict[str, WorkspaceFile]:
@@ -75,21 +74,18 @@ def _validate_upload_limits(config: AppConfig, files: list[tuple[str, bytes]]) -
 
 
 def _render_batch_summary(result: BatchOperationResult) -> None:
-    st.write(
-        {
-            "success": result.success_count,
-            "warning": result.warning_count,
-            "error": result.error_count,
-        }
-    )
+    metric_col_1, metric_col_2, metric_col_3 = st.columns(3)
+    metric_col_1.metric("Success", result.success_count)
+    metric_col_2.metric("Warning", result.warning_count)
+    metric_col_3.metric("Error", result.error_count)
+
     rows = []
     for item in result.items:
         rows.append(
             {
-                "source": item.source_name,
-                "status": item.status.value,
-                "metrics": item.metrics,
-                "messages": " | ".join(message.text for message in item.messages),
+                "File": item.source_name,
+                "Status": item.status.value.title(),
+                "Details": " | ".join(message.text for message in item.messages),
             }
         )
     st.dataframe(rows, use_container_width=True)
@@ -99,12 +95,15 @@ def _workspace_tab(
     config: AppConfig,
     workspace_service: WorkspaceService,
     merge_service: MergeService,
-    adapter: PyMuPdfAdapter,
 ) -> None:
     st.subheader("Edit and Merge PDFs")
 
     uploaded = st.file_uploader(
-        "Load one or more PDFs",
+        (
+            "Load one or more PDFs "
+            f"(max {config.max_pdf_size_mb} MB each, "
+            f"{config.max_batch_size_mb} MB total)"
+        ),
         type=["pdf"],
         accept_multiple_files=True,
         key="workspace_upload",
@@ -141,83 +140,68 @@ def _workspace_tab(
         st.info("No PDFs loaded yet.")
         return
 
-    file_by_id = _file_map(workspace_files)
     retained_counts = _retained_page_counts(page_refs)
 
-    options = {
-        f"{item.name} ({retained_counts.get(item.file_id, 0)} pages)": item.file_id
-        for item in workspace_files
-    }
-    selected_label = st.selectbox("Selected document", list(options.keys()), key="selected_doc")
-    selected_file_id = options[selected_label]
-    selected_file = file_by_id[selected_file_id]
-
-    if st.button("Remove Selected PDF"):
-        new_files, new_refs = workspace_service.remove_file(
-            workspace_files, page_refs, selected_file_id
+    st.write("### Pages (all loaded PDFs)")
+    for workspace_file in workspace_files:
+        file_refs = sorted(
+            [ref for ref in page_refs if ref.file_id == workspace_file.file_id],
+            key=lambda ref: ref.page_index,
         )
-        st.session_state.workspace_files = new_files
-        st.session_state.page_refs = new_refs
-        st.success("Selected PDF removed.")
-        st.rerun()
+        header_col_1, header_col_2 = st.columns([3, 1])
+        with header_col_1:
+            st.markdown(
+                f"**{workspace_file.name}** "
+                f"({retained_counts.get(workspace_file.file_id, 0)} pages retained)"
+            )
+        with header_col_2:
+            if st.button("Remove PDF", key=f"remove_pdf_{workspace_file.file_id}"):
+                new_files, new_refs = workspace_service.remove_file(
+                    workspace_files,
+                    page_refs,
+                    workspace_file.file_id,
+                )
+                st.session_state.workspace_files = new_files
+                st.session_state.page_refs = new_refs
+                st.rerun()
 
-    selected_refs = sorted(
-        [ref for ref in page_refs if ref.file_id == selected_file_id],
-        key=lambda ref: ref.page_index,
-    )
+        if not file_refs:
+            st.caption("No retained pages in this document.")
+            st.divider()
+            continue
 
-    if not selected_refs:
-        st.warning("No retained pages in this document.")
-    else:
-        st.write("### Thumbnails")
         cols = st.columns(5, gap="small")
-        for index, ref in enumerate(selected_refs):
+        for index, ref in enumerate(file_refs):
             with cols[index % 5]:
-                thumbnail = adapter.render_page_thumbnail(selected_file.content, ref.page_index)
+                thumbnail = _thumbnail_bytes(workspace_file.content, ref.page_index)
                 st.image(thumbnail, caption=f"Page {ref.page_index + 1}", width=125)
                 if st.button(
-                    f"Enlarge Page {ref.page_index + 1}",
-                    key=f"preview_{selected_file_id}_{ref.page_index}",
-                ):
-                    st.session_state.preview_image = adapter.render_page_thumbnail(
-                        selected_file.content,
-                        ref.page_index,
-                        zoom=1.35,
-                    )
-                    st.session_state.preview_label = f"Page {ref.page_index + 1}"
-                    st.rerun()
-                if st.button(
                     f"Remove Page {ref.page_index + 1}",
-                    key=f"remove_single_{selected_file_id}_{ref.page_index}",
+                    key=f"remove_single_{workspace_file.file_id}_{ref.page_index}",
                 ):
                     st.session_state.page_refs = workspace_service.remove_single_page(
                         st.session_state.page_refs,
-                        selected_file_id,
+                        workspace_file.file_id,
                         ref.page_index,
                     )
                     st.rerun()
 
-        page_choices = [ref.page_index + 1 for ref in selected_refs]
+        page_choices = [ref.page_index + 1 for ref in file_refs]
         selected_to_remove = st.multiselect(
             "Select multiple pages to remove",
             options=page_choices,
-            key=f"multi_select_{selected_file_id}",
+            key=f"multi_select_{workspace_file.file_id}",
         )
-        if st.button("Remove Selected Pages"):
+        if st.button("Remove Selected Pages", key=f"remove_multi_{workspace_file.file_id}"):
             zero_based = [value - 1 for value in selected_to_remove]
             st.session_state.page_refs = workspace_service.remove_multiple_pages(
                 st.session_state.page_refs,
-                selected_file_id,
+                workspace_file.file_id,
                 zero_based,
             )
             st.success(f"Removed {len(zero_based)} page(s).")
             st.rerun()
-
-    if st.session_state.preview_image is not None:
-        _page_preview_dialog(
-            st.session_state.preview_image,
-            st.session_state.preview_label,
-        )
+        st.divider()
 
     total_pages = len(st.session_state.page_refs)
     st.write(f"Total retained pages across workspace: {total_pages}")
@@ -245,7 +229,11 @@ def _extraction_tab(
     mode = st.radio("Mode", options=["Single", "Batch"], horizontal=True, key="extract_mode")
 
     if mode == "Single":
-        uploaded_single = st.file_uploader("Choose a PDF", type=["pdf"], key="extract_single")
+        uploaded_single = st.file_uploader(
+            f"Choose a PDF (max {config.max_pdf_size_mb} MB)",
+            type=["pdf"],
+            key="extract_single",
+        )
         if st.button("Run Extraction"):
             if not uploaded_single:
                 st.warning("Upload a PDF first.")
@@ -278,7 +266,11 @@ def _extraction_tab(
                 st.error(str(exc))
     else:
         uploaded_batch = st.file_uploader(
-            "Choose one or more PDFs",
+            (
+                "Choose one or more PDFs "
+                f"(max {config.max_pdf_size_mb} MB each, "
+                f"{config.max_batch_size_mb} MB total)"
+            ),
             type=["pdf"],
             accept_multiple_files=True,
             key="extract_batch",
@@ -314,7 +306,11 @@ def _validation_tab(
     mode = st.radio("Mode", options=["Single", "Batch"], horizontal=True, key="validate_mode")
 
     if mode == "Single":
-        uploaded_single = st.file_uploader("Choose a PDF", type=["pdf"], key="validate_single")
+        uploaded_single = st.file_uploader(
+            f"Choose a PDF (max {config.max_pdf_size_mb} MB)",
+            type=["pdf"],
+            key="validate_single",
+        )
         if st.button("Run Validation"):
             if not uploaded_single:
                 st.warning("Upload a PDF first.")
@@ -342,7 +338,11 @@ def _validation_tab(
                 st.error(str(exc))
     else:
         uploaded_batch = st.file_uploader(
-            "Choose one or more PDFs",
+            (
+                "Choose one or more PDFs "
+                f"(max {config.max_pdf_size_mb} MB each, "
+                f"{config.max_batch_size_mb} MB total)"
+            ),
             type=["pdf"],
             accept_multiple_files=True,
             key="validate_batch",
@@ -406,7 +406,7 @@ def main() -> None:
     )
 
     with tab_workspace:
-        _workspace_tab(config, workspace_service, merge_service, adapter)
+        _workspace_tab(config, workspace_service, merge_service)
 
     with tab_extract:
         _extraction_tab(config, extraction_service, batch_service)
