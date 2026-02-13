@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import html
 import re
 
 import streamlit as st
@@ -56,9 +55,6 @@ def _init_state() -> None:
     st.session_state.setdefault("extract_batch_uploader_token", 0)
     st.session_state.setdefault("validate_batch_uploader_token", 0)
     st.session_state.setdefault("regex_batch_uploader_token", 0)
-    st.session_state.setdefault("extract_batch_files", [])
-    st.session_state.setdefault("validate_batch_files", [])
-    st.session_state.setdefault("regex_batch_files", [])
 
 
 def _thumbnail_bytes(file_id: str, pdf_bytes: bytes, page_index: int, zoom: float = 0.38) -> bytes:
@@ -161,25 +157,6 @@ def _validate_upload_limits(config: AppConfig, files: list[tuple[str, bytes]]) -
             raise ValidationError(f"{name} is not a PDF file.")
 
 
-def _highlight_snippet(snippet: str, matched_text: str, case_sensitive: bool) -> str:
-    escaped_full = html.escape(snippet)
-    if not matched_text:
-        return escaped_full
-
-    flags = 0 if case_sensitive else re.IGNORECASE
-    pattern = re.compile(re.escape(matched_text), flags)
-    chunks: list[str] = []
-    last_end = 0
-    for match in pattern.finditer(snippet):
-        chunks.append(html.escape(snippet[last_end : match.start()]))
-        chunks.append(f"<mark>{html.escape(snippet[match.start() : match.end()])}</mark>")
-        last_end = match.end()
-    if not chunks:
-        return escaped_full
-    chunks.append(html.escape(snippet[last_end:]))
-    return "".join(chunks)
-
-
 def _render_batch_summary(result: BatchOperationResult) -> None:
     metric_col_1, metric_col_2, metric_col_3 = st.columns(3)
     metric_col_1.metric("Success", result.success_count)
@@ -197,50 +174,6 @@ def _render_batch_summary(result: BatchOperationResult) -> None:
         )
 
     st.dataframe(rows, use_container_width=True)
-
-
-def _render_staged_batch_files(files: list[tuple[str, bytes]], key_prefix: str) -> None:
-    if not files:
-        st.info("No PDFs staged yet.")
-        return
-
-    st.caption(f"Staged PDFs: {len(files)}")
-    page_size = 10
-    total_pages = (len(files) + page_size - 1) // page_size
-    page_key = f"{key_prefix}_staged_page"
-    st.session_state.setdefault(page_key, 1)
-    current_page = int(st.session_state[page_key])
-    if current_page < 1 or current_page > total_pages:
-        current_page = 1
-        st.session_state[page_key] = 1
-
-    if total_pages > 1:
-        st.caption(f"Showing page {current_page} of {total_pages}")
-        selected_page = st.number_input(
-            "Page",
-            min_value=1,
-            max_value=total_pages,
-            value=current_page,
-            step=1,
-            key=f"{key_prefix}_staged_page_selector",
-        )
-        if int(selected_page) != current_page:
-            st.session_state[page_key] = int(selected_page)
-            st.rerun()
-
-    start = (current_page - 1) * page_size
-    end = start + page_size
-    visible_files = files[start:end]
-    st.dataframe(
-        [
-            {
-                "File": name,
-                "Size (MB)": round(len(content) / (1024 * 1024), 2),
-            }
-            for name, content in visible_files
-        ],
-        use_container_width=True,
-    )
 
 
 def _workspace_tab(
@@ -456,37 +389,20 @@ def _extraction_tab(
             accept_multiple_files=True,
             key=f"extract_batch_{st.session_state.extract_batch_uploader_token}",
         )
-        staged_files: list[tuple[str, bytes]] = st.session_state.extract_batch_files
-
-        if st.button("Add Uploaded PDFs", key="add_extract_batch"):
-            new_files = (
-                [(item.name, item.getvalue()) for item in uploaded_batch] if uploaded_batch else []
-            )
-            if not new_files:
-                st.warning("Upload at least one PDF to add.")
-            else:
-                combined_files = [*staged_files, *new_files]
-                _validate_upload_limits(config, combined_files)
-                st.session_state.extract_batch_files = combined_files
-                st.session_state.extract_batch_uploader_token += 1
-                st.success(f"Added {len(new_files)} PDF(s) to batch.")
-                st.rerun()
-
         if st.button("Clear All PDFs", key="clear_extract_batch"):
-            st.session_state.extract_batch_files = []
             st.session_state.extract_batch_uploader_token += 1
             st.rerun()
 
-        staged_files = st.session_state.extract_batch_files
-        _render_staged_batch_files(staged_files, "extract")
+        files = [(item.name, item.getvalue()) for item in uploaded_batch] if uploaded_batch else []
 
         if st.button("Run Batch Extraction"):
-            if not staged_files:
+            if not files:
                 st.warning("Upload at least one PDF.")
                 return
             try:
+                _validate_upload_limits(config, files)
                 progress = st.progress(0)
-                batch_result = batch_service.run_extraction_batch(staged_files)
+                batch_result = batch_service.run_extraction_batch(files)
                 progress.progress(100)
                 _render_batch_summary(batch_result)
                 zip_name, zip_bytes = batch_service.build_zip(batch_result)
@@ -549,37 +465,21 @@ def _validation_tab(
             accept_multiple_files=True,
             key=f"validate_batch_{st.session_state.validate_batch_uploader_token}",
         )
-        staged_files: list[tuple[str, bytes]] = st.session_state.validate_batch_files
-
-        if st.button("Add Uploaded PDFs", key="add_validate_batch"):
-            new_files = (
-                [(item.name, item.getvalue()) for item in uploaded_batch] if uploaded_batch else []
-            )
-            if not new_files:
-                st.warning("Upload at least one PDF to add.")
-            else:
-                combined_files = [*staged_files, *new_files]
-                _validate_upload_limits(config, combined_files)
-                st.session_state.validate_batch_files = combined_files
-                st.session_state.validate_batch_uploader_token += 1
-                st.success(f"Added {len(new_files)} PDF(s) to batch.")
-                st.rerun()
 
         if st.button("Clear All PDFs", key="clear_validate_batch"):
-            st.session_state.validate_batch_files = []
             st.session_state.validate_batch_uploader_token += 1
             st.rerun()
 
-        staged_files = st.session_state.validate_batch_files
-        _render_staged_batch_files(staged_files, "validate")
+        files = [(item.name, item.getvalue()) for item in uploaded_batch] if uploaded_batch else []
 
         if st.button("Run Batch Validation"):
-            if not staged_files:
+            if not files:
                 st.warning("Upload at least one PDF.")
                 return
             try:
+                _validate_upload_limits(config, files)
                 progress = st.progress(0)
-                batch_result = batch_service.run_validation_batch(staged_files)
+                batch_result = batch_service.run_validation_batch(files)
                 progress.progress(100)
                 _render_batch_summary(batch_result)
 
@@ -636,6 +536,9 @@ def _regex_extract_tab(
             key="regex_single",
         )
         if st.button("Run Regex Extraction", type="primary"):
+            if not pattern.strip():
+                st.warning("Enter a regex pattern before running extraction.")
+                return
             if not uploaded_single:
                 st.warning("Upload a PDF first.")
                 return
@@ -691,12 +594,6 @@ def _regex_extract_tab(
                                 _thumbnail_html(preview, item.page_number),
                                 unsafe_allow_html=True,
                             )
-                            highlighted = _highlight_snippet(
-                                item.snippet,
-                                item.matched_text,
-                                case_sensitive,
-                            )
-                            st.markdown(highlighted, unsafe_allow_html=True)
                 elif keep_first_page:
                     st.info("No page matched regex. Output includes first page only.")
             except Exception as exc:
@@ -712,37 +609,24 @@ def _regex_extract_tab(
             accept_multiple_files=True,
             key=f"regex_batch_{st.session_state.regex_batch_uploader_token}",
         )
-        staged_files: list[tuple[str, bytes]] = st.session_state.regex_batch_files
-
-        if st.button("Add Uploaded PDFs", key="add_regex_batch"):
-            new_files = (
-                [(item.name, item.getvalue()) for item in uploaded_batch] if uploaded_batch else []
-            )
-            if not new_files:
-                st.warning("Upload at least one PDF to add.")
-            else:
-                combined_files = [*staged_files, *new_files]
-                _validate_upload_limits(config, combined_files)
-                st.session_state.regex_batch_files = combined_files
-                st.session_state.regex_batch_uploader_token += 1
-                st.success(f"Added {len(new_files)} PDF(s) to batch.")
-                st.rerun()
 
         if st.button("Clear All PDFs", key="clear_regex_batch"):
-            st.session_state.regex_batch_files = []
             st.session_state.regex_batch_uploader_token += 1
             st.rerun()
 
-        staged_files = st.session_state.regex_batch_files
-        _render_staged_batch_files(staged_files, "regex")
+        files = [(item.name, item.getvalue()) for item in uploaded_batch] if uploaded_batch else []
 
         if st.button("Run Batch Regex Extraction", type="primary"):
-            if not staged_files:
+            if not pattern.strip():
+                st.warning("Enter a regex pattern before running extraction.")
+                return
+            if not files:
                 st.warning("Upload at least one PDF.")
                 return
             try:
+                _validate_upload_limits(config, files)
                 batch_result = regex_search_service.run_batch_extraction(
-                    files=staged_files,
+                    files=files,
                     pattern=pattern,
                     case_sensitive=case_sensitive,
                     keep_first_page=keep_first_page,
