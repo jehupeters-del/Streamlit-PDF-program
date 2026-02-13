@@ -66,6 +66,23 @@ class ExtractionResult:
 
 
 @dataclass(frozen=True)
+class RegexPageMatch:
+    page_number: int
+    match_count: int
+    snippet: str
+
+
+@dataclass(frozen=True)
+class RegexSearchResult:
+    output_name: str
+    output_pdf: bytes
+    original_pages: int
+    extracted_pages: int
+    matched_pages: list[int]
+    matches: list[RegexPageMatch]
+
+
+@dataclass(frozen=True)
 class MergeResult:
     output_name: str
     output_pdf: bytes

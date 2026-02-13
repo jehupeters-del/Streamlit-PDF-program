@@ -12,6 +12,7 @@ from src.infrastructure.config import AppConfig
 from src.services.batch_service import BatchService
 from src.services.extraction_service import ExtractionService
 from src.services.merge_service import MergeService
+from src.services.regex_search_service import RegexSearchService
 from src.services.validation_service import ValidationService
 from src.services.workspace_service import WorkspaceService
 
@@ -21,6 +22,7 @@ def _init_services() -> tuple[
     WorkspaceService,
     MergeService,
     ExtractionService,
+    RegexSearchService,
     ValidationService,
     BatchService,
 ]:
@@ -28,6 +30,7 @@ def _init_services() -> tuple[
     adapter = PyMuPdfAdapter()
     validation_service = ValidationService(adapter)
     extraction_service = ExtractionService(adapter, validation_service)
+    regex_search_service = RegexSearchService(adapter)
     workspace_service = WorkspaceService(adapter, config)
     merge_service = MergeService(adapter)
     batch_service = BatchService(extraction_service, validation_service)
@@ -36,6 +39,7 @@ def _init_services() -> tuple[
         workspace_service,
         merge_service,
         extraction_service,
+        regex_search_service,
         validation_service,
         batch_service,
     )
@@ -493,6 +497,122 @@ def _validation_tab(
                 st.error(str(exc))
 
 
+def _regex_extract_tab(
+    config: AppConfig,
+    regex_search_service: RegexSearchService,
+    batch_service: BatchService,
+) -> None:
+    st.subheader("Regex Page Extractor", anchor=False)
+    st.caption("Extract pages matching your regex and download a new PDF.")
+
+    mode = st.radio("Mode", options=["Single", "Batch"], horizontal=True, key="regex_mode")
+    pattern = st.text_input(
+        "Regex pattern",
+        placeholder=r"Example: solution\.",
+        key="regex_pattern",
+    )
+    option_col_1, option_col_2 = st.columns(2)
+    with option_col_1:
+        case_sensitive = st.checkbox("Case-sensitive", key="regex_case_sensitive", value=False)
+    with option_col_2:
+        keep_first_page = st.checkbox(
+            "Keep first page in output",
+            key="regex_keep_first_page",
+            value=True,
+        )
+
+    if mode == "Single":
+        uploaded_single = st.file_uploader(
+            f"Choose a PDF (max {config.max_pdf_size_mb} MB)",
+            type=["pdf"],
+            key="regex_single",
+        )
+        if st.button("Run Regex Extraction", type="primary"):
+            if not uploaded_single:
+                st.warning("Upload a PDF first.")
+                return
+            try:
+                content = uploaded_single.getvalue()
+                _validate_upload_limits(config, [(uploaded_single.name, content)])
+                result = regex_search_service.extract_matching_pages(
+                    input_name=uploaded_single.name,
+                    pdf_bytes=content,
+                    pattern=pattern,
+                    case_sensitive=case_sensitive,
+                    keep_first_page=keep_first_page,
+                )
+
+                st.download_button(
+                    "Download Matched PDF",
+                    data=result.output_pdf,
+                    file_name=result.output_name,
+                    mime="application/pdf",
+                    type="primary",
+                )
+
+                stat_col_1, stat_col_2, stat_col_3 = st.columns(3)
+                stat_col_1.metric("Original pages", result.original_pages)
+                stat_col_2.metric("Matched pages", len(result.matched_pages))
+                stat_col_3.metric("Extracted pages", result.extracted_pages)
+
+                if result.matches:
+                    st.dataframe(
+                        [
+                            {
+                                "Page": item.page_number,
+                                "Matches": item.match_count,
+                                "Snippet": item.snippet,
+                            }
+                            for item in result.matches
+                        ],
+                        use_container_width=True,
+                    )
+                elif keep_first_page:
+                    st.info("No page matched regex. Output includes first page only.")
+            except Exception as exc:
+                st.error(str(exc))
+    else:
+        uploaded_batch = st.file_uploader(
+            (
+                "Choose one or more PDFs "
+                f"(max {config.max_pdf_size_mb} MB each, "
+                f"{config.max_batch_size_mb} MB total)"
+            ),
+            type=["pdf"],
+            accept_multiple_files=True,
+            key="regex_batch",
+        )
+        if st.button("Run Batch Regex Extraction", type="primary"):
+            files = (
+                [(item.name, item.getvalue()) for item in uploaded_batch] if uploaded_batch else []
+            )
+            if not files:
+                st.warning("Upload at least one PDF.")
+                return
+            try:
+                _validate_upload_limits(config, files)
+                batch_result = regex_search_service.run_batch_extraction(
+                    files=files,
+                    pattern=pattern,
+                    case_sensitive=case_sensitive,
+                    keep_first_page=keep_first_page,
+                )
+                _render_batch_summary(batch_result)
+                zip_name, zip_bytes = batch_service.build_zip(
+                    batch_result,
+                    zip_name="regex_batch_outputs.zip",
+                )
+                st.download_button(
+                    "Download Batch ZIP",
+                    data=zip_bytes,
+                    file_name=zip_name,
+                    mime="application/zip",
+                    type="primary",
+                )
+            except Exception as exc:
+                st.error(str(exc))
+
+
 def main() -> None:
     st.set_page_config(page_title="PDF Suite Core", layout="wide")
     st.title("PDF Suite Core — Streamlit Rebuild", anchor=False)
@@ -502,13 +622,14 @@ def main() -> None:
         workspace_service,
         merge_service,
         extraction_service,
+        regex_search_service,
         validation_service,
         batch_service,
     ) = _init_services()
     _init_state()
 
-    tab_workspace, tab_extract, tab_validate = st.tabs(
-        ["Edit & Merge", "Extract Questions", "Validate Questions"]
+    tab_workspace, tab_extract, tab_validate, tab_regex = st.tabs(
+        ["Edit & Merge", "Extract Questions", "Validate Questions", "Regex Extract"]
     )
 
     with tab_workspace:
@@ -519,6 +640,9 @@ def main() -> None:
 
     with tab_validate:
         _validation_tab(config, validation_service, batch_service)
+
+    with tab_regex:
+        _regex_extract_tab(config, regex_search_service, batch_service)
 
 
 if __name__ == "__main__":
