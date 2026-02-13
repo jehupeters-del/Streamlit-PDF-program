@@ -55,9 +55,11 @@ def _init_state() -> None:
     st.session_state.setdefault("extract_batch_uploader_token", 0)
     st.session_state.setdefault("validate_batch_uploader_token", 0)
     st.session_state.setdefault("regex_batch_uploader_token", 0)
+    st.session_state.setdefault("regex_last_result_name", "")
+    st.session_state.setdefault("regex_last_result_bytes", b"")
 
 
-def _thumbnail_bytes(file_id: str, pdf_bytes: bytes, page_index: int, zoom: float = 0.38) -> bytes:
+def _thumbnail_bytes(file_id: str, pdf_bytes: bytes, page_index: int, zoom: float = 0.42) -> bytes:
     key = (file_id, page_index, round(zoom, 3))
     thumbnail_cache: dict[tuple[str, int, float], bytes] = st.session_state.thumbnail_cache
     if key not in thumbnail_cache:
@@ -510,6 +512,7 @@ def _validation_tab(
 
 def _regex_extract_tab(
     config: AppConfig,
+    workspace_service: WorkspaceService,
     regex_search_service: RegexSearchService,
     batch_service: BatchService,
 ) -> None:
@@ -561,6 +564,9 @@ def _regex_extract_tab(
                     type="primary",
                 )
 
+                st.session_state.regex_last_result_name = result.output_name
+                st.session_state.regex_last_result_bytes = result.output_pdf
+
                 stat_col_1, stat_col_2, stat_col_3 = st.columns(3)
                 stat_col_1.metric("Original pages", result.original_pages)
                 stat_col_2.metric("Matched pages", len(result.matched_pages))
@@ -588,7 +594,7 @@ def _regex_extract_tab(
                                 pdf_bytes=content,
                                 page_index=item.page_number - 1,
                                 search_terms=[item.matched_text],
-                                zoom=0.38,
+                                zoom=0.42,
                             )
                             st.markdown(
                                 _thumbnail_html(preview, item.page_number),
@@ -596,6 +602,37 @@ def _regex_extract_tab(
                             )
                 elif keep_first_page:
                     st.info("No page matched regex. Output includes first page only.")
+            except Exception as exc:
+                st.error(str(exc))
+
+        if (
+            st.session_state.regex_last_result_name
+            and st.session_state.regex_last_result_bytes
+            and st.button(
+                "Open in Edit & Merge Workspace",
+                key="regex_keep_editing",
+                type="primary",
+                use_container_width=True,
+            )
+        ):
+            try:
+                loaded = workspace_service.load_files(
+                    [
+                        (
+                            st.session_state.regex_last_result_name,
+                            st.session_state.regex_last_result_bytes,
+                        )
+                    ]
+                )
+                st.session_state.workspace_files = loaded
+                st.session_state.page_refs = workspace_service.initial_page_refs(loaded)
+                st.session_state.thumbnail_cache = {}
+                st.session_state.merged_signature = ""
+                st.session_state.merged_pdf_bytes = b""
+                st.session_state.merged_pdf_name = "merged_output.pdf"
+                st.session_state.active_main_tab = "Edit & Merge"
+                st.success("Loaded result into Edit & Merge workspace.")
+                st.rerun()
             except Exception as exc:
                 st.error(str(exc))
     else:
@@ -662,21 +699,27 @@ def main() -> None:
     ) = _init_services()
     _init_state()
 
-    tab_workspace, tab_extract, tab_validate, tab_regex = st.tabs(
-        ["Edit & Merge", "Extract Questions", "Validate Questions", "Regex Extract"]
+    tab_options = ["Edit & Merge", "Extract Questions", "Validate Questions", "Regex Extract"]
+    st.session_state.setdefault("active_main_tab", "Edit & Merge")
+    if st.session_state.active_main_tab not in tab_options:
+        st.session_state.active_main_tab = "Edit & Merge"
+
+    selected_tab = st.radio(
+        "Section",
+        options=tab_options,
+        horizontal=True,
+        key="active_main_tab",
+        label_visibility="collapsed",
     )
 
-    with tab_workspace:
+    if selected_tab == "Edit & Merge":
         _workspace_tab(config, workspace_service, merge_service)
-
-    with tab_extract:
+    elif selected_tab == "Extract Questions":
         _extraction_tab(config, extraction_service, batch_service)
-
-    with tab_validate:
+    elif selected_tab == "Validate Questions":
         _validation_tab(config, validation_service, batch_service)
-
-    with tab_regex:
-        _regex_extract_tab(config, regex_search_service, batch_service)
+    else:
+        _regex_extract_tab(config, workspace_service, regex_search_service, batch_service)
 
 
 if __name__ == "__main__":
