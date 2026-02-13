@@ -43,12 +43,16 @@ def _init_services() -> tuple[
 def _init_state() -> None:
     st.session_state.setdefault("workspace_files", [])
     st.session_state.setdefault("page_refs", [])
+    st.session_state.setdefault("thumbnail_cache", {})
 
 
-@st.cache_data(show_spinner=False)
-def _thumbnail_bytes(pdf_bytes: bytes, page_index: int) -> bytes:
-    adapter = PyMuPdfAdapter()
-    return adapter.render_page_thumbnail(pdf_bytes, page_index, zoom=0.38)
+def _thumbnail_bytes(file_id: str, pdf_bytes: bytes, page_index: int) -> bytes:
+    key = (file_id, page_index)
+    thumbnail_cache: dict[tuple[str, int], bytes] = st.session_state.thumbnail_cache
+    if key not in thumbnail_cache:
+        adapter = PyMuPdfAdapter()
+        thumbnail_cache[key] = adapter.render_page_thumbnail(pdf_bytes, page_index, zoom=0.38)
+    return thumbnail_cache[key]
 
 
 def _file_map(files: list[WorkspaceFile]) -> dict[str, WorkspaceFile]:
@@ -96,7 +100,8 @@ def _workspace_tab(
     workspace_service: WorkspaceService,
     merge_service: MergeService,
 ) -> None:
-    st.subheader("Edit and Merge PDFs")
+    st.subheader("Edit and Merge PDFs", anchor=False)
+    st.caption("Review all loaded PDFs below, remove unwanted pages, then merge.")
 
     uploaded = st.file_uploader(
         (
@@ -125,6 +130,7 @@ def _workspace_tab(
         if st.button("New (Reset Workspace)"):
             st.session_state.workspace_files = []
             st.session_state.page_refs = []
+            st.session_state.thumbnail_cache = {}
             st.success("Workspace reset.")
     with col_limits:
         st.caption(
@@ -163,6 +169,11 @@ def _workspace_tab(
                 )
                 st.session_state.workspace_files = new_files
                 st.session_state.page_refs = new_refs
+                st.session_state.thumbnail_cache = {
+                    key: value
+                    for key, value in st.session_state.thumbnail_cache.items()
+                    if key[0] != workspace_file.file_id
+                }
                 st.rerun()
 
         if not file_refs:
@@ -173,7 +184,11 @@ def _workspace_tab(
         cols = st.columns(5, gap="small")
         for index, ref in enumerate(file_refs):
             with cols[index % 5]:
-                thumbnail = _thumbnail_bytes(workspace_file.content, ref.page_index)
+                thumbnail = _thumbnail_bytes(
+                    workspace_file.file_id,
+                    workspace_file.content,
+                    ref.page_index,
+                )
                 st.image(thumbnail, caption=f"Page {ref.page_index + 1}", width=125)
                 if st.button(
                     f"Remove Page {ref.page_index + 1}",
@@ -187,20 +202,22 @@ def _workspace_tab(
                     st.rerun()
 
         page_choices = [ref.page_index + 1 for ref in file_refs]
-        selected_to_remove = st.multiselect(
-            "Select multiple pages to remove",
-            options=page_choices,
-            key=f"multi_select_{workspace_file.file_id}",
-        )
-        if st.button("Remove Selected Pages", key=f"remove_multi_{workspace_file.file_id}"):
-            zero_based = [value - 1 for value in selected_to_remove]
-            st.session_state.page_refs = workspace_service.remove_multiple_pages(
-                st.session_state.page_refs,
-                workspace_file.file_id,
-                zero_based,
+        with st.form(key=f"remove_multi_form_{workspace_file.file_id}"):
+            selected_to_remove = st.multiselect(
+                "Select multiple pages to remove",
+                options=page_choices,
+                key=f"multi_select_{workspace_file.file_id}",
             )
-            st.success(f"Removed {len(zero_based)} page(s).")
-            st.rerun()
+            submit = st.form_submit_button("Remove Selected Pages")
+            if submit:
+                zero_based = [value - 1 for value in selected_to_remove]
+                st.session_state.page_refs = workspace_service.remove_multiple_pages(
+                    st.session_state.page_refs,
+                    workspace_file.file_id,
+                    zero_based,
+                )
+                st.success(f"Removed {len(zero_based)} page(s).")
+                st.rerun()
         st.divider()
 
     total_pages = len(st.session_state.page_refs)
@@ -225,7 +242,8 @@ def _workspace_tab(
 def _extraction_tab(
     config: AppConfig, extraction_service: ExtractionService, batch_service: BatchService
 ) -> None:
-    st.subheader("Extract Questions Only")
+    st.subheader("Extract Questions Only", anchor=False)
+    st.caption("Run single or batch extraction and download clean outputs.")
     mode = st.radio("Mode", options=["Single", "Batch"], horizontal=True, key="extract_mode")
 
     if mode == "Single":
@@ -302,7 +320,8 @@ def _extraction_tab(
 def _validation_tab(
     config: AppConfig, validation_service: ValidationService, batch_service: BatchService
 ) -> None:
-    st.subheader("Validate Questions")
+    st.subheader("Validate Questions", anchor=False)
+    st.caption("Check question sequence continuity with clear summary results.")
     mode = st.radio("Mode", options=["Single", "Batch"], horizontal=True, key="validate_mode")
 
     if mode == "Single":
