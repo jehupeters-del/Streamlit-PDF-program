@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import asdict
-
 import streamlit as st
 
 from src.adapters.pymupdf_adapter import PyMuPdfAdapter
@@ -13,6 +11,11 @@ from src.services.extraction_service import ExtractionService
 from src.services.merge_service import MergeService
 from src.services.validation_service import ValidationService
 from src.services.workspace_service import WorkspaceService
+
+
+@st.dialog("Page Preview")
+def _page_preview_dialog(preview_image: bytes, page_label: str) -> None:
+    st.image(preview_image, caption=page_label, use_container_width=True)
 
 
 def _init_services() -> tuple[
@@ -45,6 +48,8 @@ def _init_services() -> tuple[
 def _init_state() -> None:
     st.session_state.setdefault("workspace_files", [])
     st.session_state.setdefault("page_refs", [])
+    st.session_state.setdefault("preview_image", None)
+    st.session_state.setdefault("preview_label", "")
 
 
 def _file_map(files: list[WorkspaceFile]) -> dict[str, WorkspaceFile]:
@@ -165,11 +170,22 @@ def _workspace_tab(
         st.warning("No retained pages in this document.")
     else:
         st.write("### Thumbnails")
-        cols = st.columns(4)
+        cols = st.columns(5, gap="small")
         for index, ref in enumerate(selected_refs):
-            with cols[index % 4]:
+            with cols[index % 5]:
                 thumbnail = adapter.render_page_thumbnail(selected_file.content, ref.page_index)
-                st.image(thumbnail, caption=f"Page {ref.page_index + 1}", width=170)
+                st.image(thumbnail, caption=f"Page {ref.page_index + 1}", width=125)
+                if st.button(
+                    f"Enlarge Page {ref.page_index + 1}",
+                    key=f"preview_{selected_file_id}_{ref.page_index}",
+                ):
+                    st.session_state.preview_image = adapter.render_page_thumbnail(
+                        selected_file.content,
+                        ref.page_index,
+                        zoom=1.35,
+                    )
+                    st.session_state.preview_label = f"Page {ref.page_index + 1}"
+                    st.rerun()
                 if st.button(
                     f"Remove Page {ref.page_index + 1}",
                     key=f"remove_single_{selected_file_id}_{ref.page_index}",
@@ -196,6 +212,12 @@ def _workspace_tab(
             )
             st.success(f"Removed {len(zero_based)} page(s).")
             st.rerun()
+
+    if st.session_state.preview_image is not None:
+        _page_preview_dialog(
+            st.session_state.preview_image,
+            st.session_state.preview_label,
+        )
 
     total_pages = len(st.session_state.page_refs)
     st.write(f"Total retained pages across workspace: {total_pages}")
@@ -301,13 +323,21 @@ def _validation_tab(
                 content = uploaded_single.getvalue()
                 _validate_upload_limits(config, [(uploaded_single.name, content)])
                 single_result = validation_service.validate_pdf(content)
-                st.json(asdict(single_result))
+                stat_col_1, stat_col_2, stat_col_3 = st.columns(3)
+                stat_col_1.metric("Max question", single_result.max_question)
+                stat_col_2.metric("Questions found", len(single_result.found_questions))
+                stat_col_3.metric("Missing count", len(single_result.missing_questions))
                 if single_result.max_question == 0:
                     st.info("No questions found (valid by rule).")
                 elif single_result.is_valid:
                     st.success("All questions are present.")
                 else:
                     st.warning(f"Missing questions: {single_result.missing_questions}")
+                if single_result.found_questions:
+                    st.caption(
+                        "Detected questions: "
+                        + ", ".join(str(number) for number in single_result.found_questions)
+                    )
             except Exception as exc:
                 st.error(str(exc))
     else:

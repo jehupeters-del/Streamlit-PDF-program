@@ -108,11 +108,23 @@ class BatchService:
         result: BatchOperationResult, zip_name: str = "batch_extraction_outputs.zip"
     ) -> tuple[str, bytes]:
         buffer = io.BytesIO()
+        used_names: dict[str, int] = {}
         with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
             for item in result.items:
                 if item.artifact_name and item.artifact_bytes:
+                    safe_name = BatchService._safe_artifact_name(item.artifact_name)
+                    stem, dot, extension = safe_name.rpartition(".")
+                    if not stem:
+                        stem = safe_name
+                        dot = ""
+                        extension = ""
+                    sequence = used_names.get(safe_name, 0)
+                    used_names[safe_name] = sequence + 1
+                    unique_name = safe_name
+                    if sequence > 0:
+                        unique_name = f"{stem} ({sequence + 1}){dot}{extension}"
                     archive.writestr(
-                        BatchService._safe_artifact_name(item.artifact_name),
+                        unique_name,
                         item.artifact_bytes,
                     )
         return zip_name, buffer.getvalue()

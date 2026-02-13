@@ -31,6 +31,8 @@ jobs:
         run: mypy src app
 
       - name: Tests with coverage gate
+        env:
+          PYTHONPATH: .
         run: pytest
 
       - name: Build sanity

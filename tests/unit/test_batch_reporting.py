@@ -36,3 +36,32 @@ def test_safe_artifact_name_strips_paths() -> None:
     assert "/" not in sanitized
     assert "\\" not in sanitized
     assert "?" not in sanitized
+
+
+@pytest.mark.unit
+def test_build_zip_avoids_name_collisions() -> None:
+    result = BatchOperationResult(
+        items=[
+            BatchItemResult(
+                source_name="a.pdf",
+                status=Status.SUCCESS,
+                artifact_name="January 2019 solutions.pdf",
+                artifact_bytes=b"A",
+            ),
+            BatchItemResult(
+                source_name="b.pdf",
+                status=Status.SUCCESS,
+                artifact_name="January 2019 solutions.pdf",
+                artifact_bytes=b"B",
+            ),
+        ]
+    )
+
+    _, zip_bytes = BatchService.build_zip(result)
+    import io
+    import zipfile
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as archive:
+        names = archive.namelist()
+        assert "January 2019 solutions.pdf" in names
+        assert "January 2019 solutions (2).pdf" in names
