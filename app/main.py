@@ -5,13 +5,6 @@ import re
 
 import streamlit as st
 
-try:
-    from streamlit_sortables import sort_items  # type: ignore[import-untyped]
-
-    HAS_SORTABLES = True
-except Exception:
-    HAS_SORTABLES = False
-
 from src.adapters.pymupdf_adapter import PyMuPdfAdapter
 from src.domain.errors import ValidationError
 from src.domain.models import BatchOperationResult, PageRef, WorkspaceFile
@@ -230,77 +223,30 @@ def _workspace_tab(
 
     st.subheader("Pages (all loaded PDFs)", anchor=False)
     for workspace_file in workspace_files:
-        file_refs = sorted(
-            [ref for ref in page_refs if ref.file_id == workspace_file.file_id],
-            key=lambda ref: ref.page_index,
+        file_refs = [ref for ref in page_refs if ref.file_id == workspace_file.file_id]
+        st.markdown(
+            f"**{workspace_file.name}** "
+            f"({retained_counts.get(workspace_file.file_id, 0)} pages retained)"
         )
-        header_col_1, header_col_2 = st.columns([7, 2])
-        with header_col_1:
-            st.markdown(
-                f"**{workspace_file.name}** "
-                f"({retained_counts.get(workspace_file.file_id, 0)} pages retained)"
+        if st.button("Remove PDF", key=f"remove_pdf_{workspace_file.file_id}"):
+            new_files, new_refs = workspace_service.remove_file(
+                workspace_files,
+                page_refs,
+                workspace_file.file_id,
             )
-        with header_col_2:
-            if st.button(
-                "Remove PDF",
-                key=f"remove_pdf_{workspace_file.file_id}",
-                use_container_width=True,
-            ):
-                new_files, new_refs = workspace_service.remove_file(
-                    workspace_files,
-                    page_refs,
-                    workspace_file.file_id,
-                )
-                st.session_state.workspace_files = new_files
-                st.session_state.page_refs = new_refs
-                st.session_state.thumbnail_cache = {
-                    key: value
-                    for key, value in st.session_state.thumbnail_cache.items()
-                    if key[0] != workspace_file.file_id
-                }
-                st.rerun()
+            st.session_state.workspace_files = new_files
+            st.session_state.page_refs = new_refs
+            st.session_state.thumbnail_cache = {
+                key: value
+                for key, value in st.session_state.thumbnail_cache.items()
+                if key[0] != workspace_file.file_id
+            }
+            st.rerun()
 
         if not file_refs:
             st.caption("No retained pages in this document.")
             st.divider()
             continue
-
-        if HAS_SORTABLES:
-            sortable_items = [
-                f"Page {position + 1} (source {ref.page_index + 1})"
-                for position, ref in enumerate(file_refs)
-            ]
-            token_to_ref = {token: ref for token, ref in zip(sortable_items, file_refs)}
-            with st.expander("Reorder pages (drag and drop)", expanded=False):
-                st.caption("Drag pages into a new order, then apply.")
-                reordered_tokens = sort_items(
-                    sortable_items,
-                    direction="vertical",
-                    key=f"sortable_{workspace_file.file_id}",
-                )
-                if st.button(
-                    "Apply Page Order",
-                    key=f"apply_order_{workspace_file.file_id}",
-                    use_container_width=True,
-                ):
-                    reordered_refs = [token_to_ref[token] for token in reordered_tokens]
-
-                    by_file: dict[str, list[PageRef]] = {
-                        item.file_id: [] for item in st.session_state.workspace_files
-                    }
-                    for page_ref in st.session_state.page_refs:
-                        by_file.setdefault(page_ref.file_id, []).append(page_ref)
-                    by_file[workspace_file.file_id] = reordered_refs
-
-                    rebuilt_refs: list[PageRef] = []
-                    for item in st.session_state.workspace_files:
-                        rebuilt_refs.extend(by_file.get(item.file_id, []))
-
-                    st.session_state.page_refs = rebuilt_refs
-                    st.success("Page order updated.")
-                    st.rerun()
-        else:
-            st.caption("Drag-and-drop reorder is unavailable in this environment.")
 
         thumbnails_per_row = _auto_thumbnail_columns(len(file_refs))
         cols = st.columns(thumbnails_per_row, gap="small")
