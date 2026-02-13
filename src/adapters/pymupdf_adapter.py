@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-from io import BytesIO
 from typing import cast
 
 import fitz  # type: ignore[import-untyped]
-from PIL import Image
 
 from src.domain.errors import ParsingError
 from src.domain.models import PageRef, WorkspaceFile
 
 
 class PyMuPdfAdapter:
-    THUMBNAIL_SUPERSAMPLE_FACTOR = 1.2
+    THUMBNAIL_SUPERSAMPLE_FACTOR = 2.0
 
     @staticmethod
     def _optimized_bytes(document: fitz.Document) -> bytes:
@@ -32,19 +30,7 @@ class PyMuPdfAdapter:
         render_zoom = zoom * supersample
         matrix = fitz.Matrix(render_zoom, render_zoom)
         pixmap = page.get_pixmap(matrix=matrix, alpha=False)
-
-        if supersample <= 1.0:
-            return cast(bytes, pixmap.tobytes("png"))
-
-        raw_png = cast(bytes, pixmap.tobytes("png"))
-        target_width = max(1, int(pixmap.width / supersample))
-        target_height = max(1, int(pixmap.height / supersample))
-        with Image.open(BytesIO(raw_png)) as image:
-            resampling = getattr(Image, "Resampling", Image)
-            resized = image.resize((target_width, target_height), resampling.LANCZOS)
-            out = BytesIO()
-            resized.save(out, format="PNG", optimize=True)
-            return out.getvalue()
+        return cast(bytes, pixmap.tobytes("png"))
 
     def get_page_count(self, pdf_bytes: bytes) -> int:
         try:

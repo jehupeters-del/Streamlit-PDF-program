@@ -18,7 +18,7 @@ from src.services.workspace_service import WorkspaceService
 
 
 THUMBNAIL_DISPLAY_ZOOM = 0.38
-THUMBNAIL_COLUMNS = 4
+THUMBNAIL_COLUMNS = 5
 
 
 def _init_services() -> tuple[
