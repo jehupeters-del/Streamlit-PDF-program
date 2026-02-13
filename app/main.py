@@ -177,7 +177,7 @@ def _highlight_snippet(snippet: str, matched_text: str, case_sensitive: bool) ->
     return "".join(chunks)
 
 
-def _render_batch_summary(result: BatchOperationResult, table_key: str) -> None:
+def _render_batch_summary(result: BatchOperationResult) -> None:
     metric_col_1, metric_col_2, metric_col_3 = st.columns(3)
     metric_col_1.metric("Success", result.success_count)
     metric_col_2.metric("Warning", result.warning_count)
@@ -194,53 +194,6 @@ def _render_batch_summary(result: BatchOperationResult, table_key: str) -> None:
         )
 
     st.dataframe(rows, use_container_width=True)
-
-
-def _render_uploaded_file_list(files: list[tuple[str, bytes]], key_prefix: str) -> None:
-    if not files:
-        return
-
-    page_size = 10
-    total_files = len(files)
-    total_pages = (total_files + page_size - 1) // page_size
-
-    current_key = f"{key_prefix}_upload_page"
-    st.session_state.setdefault(current_key, 1)
-    current_page = int(st.session_state[current_key])
-    if current_page < 1 or current_page > total_pages:
-        current_page = 1
-        st.session_state[current_key] = 1
-
-    if total_pages > 1:
-        info_col, nav_col = st.columns([3, 2])
-        with info_col:
-            st.caption(f"Showing page {current_page} of {total_pages}")
-        with nav_col:
-            selected_page = st.number_input(
-                "Uploaded files page",
-                min_value=1,
-                max_value=total_pages,
-                value=current_page,
-                step=1,
-                key=f"{key_prefix}_upload_page_selector",
-            )
-            if int(selected_page) != current_page:
-                st.session_state[current_key] = int(selected_page)
-                st.rerun()
-
-    start = (current_page - 1) * page_size
-    end = start + page_size
-    page_files = files[start:end]
-    st.dataframe(
-        [
-            {
-                "File": name,
-                "Size (MB)": round(len(content) / (1024 * 1024), 2),
-            }
-            for name, content in page_files
-        ],
-        use_container_width=True,
-    )
 
 
 def _workspace_tab(
@@ -460,7 +413,6 @@ def _extraction_tab(
             st.session_state.extract_batch_uploader_token += 1
             st.rerun()
         files = [(item.name, item.getvalue()) for item in uploaded_batch] if uploaded_batch else []
-        _render_uploaded_file_list(files, "extract")
         if st.button("Run Batch Extraction"):
             if not files:
                 st.warning("Upload at least one PDF.")
@@ -470,7 +422,7 @@ def _extraction_tab(
                 progress = st.progress(0)
                 batch_result = batch_service.run_extraction_batch(files)
                 progress.progress(100)
-                _render_batch_summary(batch_result, table_key="extract_batch_summary")
+                _render_batch_summary(batch_result)
                 zip_name, zip_bytes = batch_service.build_zip(batch_result)
                 st.download_button(
                     "Download Batch ZIP",
@@ -535,7 +487,6 @@ def _validation_tab(
             st.session_state.validate_batch_uploader_token += 1
             st.rerun()
         files = [(item.name, item.getvalue()) for item in uploaded_batch] if uploaded_batch else []
-        _render_uploaded_file_list(files, "validate")
         if st.button("Run Batch Validation"):
             if not files:
                 st.warning("Upload at least one PDF.")
@@ -545,7 +496,7 @@ def _validation_tab(
                 progress = st.progress(0)
                 batch_result = batch_service.run_validation_batch(files)
                 progress.progress(100)
-                _render_batch_summary(batch_result, table_key="validate_batch_summary")
+                _render_batch_summary(batch_result)
 
                 csv_name, csv_bytes = batch_service.build_validation_csv(batch_result)
                 txt_name, txt_summary = batch_service.build_validation_text_summary(batch_result)
@@ -680,7 +631,6 @@ def _regex_extract_tab(
             st.session_state.regex_batch_uploader_token += 1
             st.rerun()
         files = [(item.name, item.getvalue()) for item in uploaded_batch] if uploaded_batch else []
-        _render_uploaded_file_list(files, "regex")
         if st.button("Run Batch Regex Extraction", type="primary"):
             if not files:
                 st.warning("Upload at least one PDF.")
@@ -693,7 +643,7 @@ def _regex_extract_tab(
                     case_sensitive=case_sensitive,
                     keep_first_page=keep_first_page,
                 )
-                _render_batch_summary(batch_result, table_key="regex_batch_summary")
+                _render_batch_summary(batch_result)
                 zip_name, zip_bytes = batch_service.build_zip(
                     batch_result,
                     zip_name="regex_batch_outputs.zip",
