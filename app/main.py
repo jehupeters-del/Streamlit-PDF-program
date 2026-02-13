@@ -5,6 +5,13 @@ import re
 
 import streamlit as st
 
+try:
+    from streamlit_sortables import sort_items  # type: ignore[import-untyped]
+
+    HAS_SORTABLES = True
+except Exception:
+    HAS_SORTABLES = False
+
 from src.adapters.pymupdf_adapter import PyMuPdfAdapter
 from src.domain.errors import ValidationError
 from src.domain.models import BatchOperationResult, PageRef, WorkspaceFile
@@ -114,6 +121,20 @@ def _merge_signature(workspace_files: list[WorkspaceFile], page_refs: list[PageR
     return f"{file_sig}::{page_sig}"
 
 
+def _auto_thumbnail_columns(page_count: int) -> int:
+    if page_count <= 1:
+        return 1
+    if page_count <= 4:
+        return 2
+    if page_count <= 9:
+        return 3
+    if page_count <= 16:
+        return 4
+    if page_count <= 25:
+        return 5
+    return 6
+
+
 def _file_map(files: list[WorkspaceFile]) -> dict[str, WorkspaceFile]:
     return {item.file_id: item for item in files}
 
@@ -198,14 +219,6 @@ def _workspace_tab(
             f"{config.max_batch_size_mb} MB per batch"
         )
 
-    thumbnails_per_row = st.slider(
-        "Thumbnails per row",
-        min_value=2,
-        max_value=8,
-        value=4,
-        key="thumbs_per_row",
-    )
-
     workspace_files: list[WorkspaceFile] = st.session_state.workspace_files
     page_refs: list[PageRef] = st.session_state.page_refs
 
@@ -221,14 +234,18 @@ def _workspace_tab(
             [ref for ref in page_refs if ref.file_id == workspace_file.file_id],
             key=lambda ref: ref.page_index,
         )
-        header_col_1, header_col_2 = st.columns([3, 1])
+        header_col_1, header_col_2 = st.columns([7, 2])
         with header_col_1:
             st.markdown(
                 f"**{workspace_file.name}** "
                 f"({retained_counts.get(workspace_file.file_id, 0)} pages retained)"
             )
         with header_col_2:
-            if st.button("Remove PDF", key=f"remove_pdf_{workspace_file.file_id}"):
+            if st.button(
+                "Remove PDF",
+                key=f"remove_pdf_{workspace_file.file_id}",
+                use_container_width=True,
+            ):
                 new_files, new_refs = workspace_service.remove_file(
                     workspace_files,
                     page_refs,
@@ -248,6 +265,44 @@ def _workspace_tab(
             st.divider()
             continue
 
+        if HAS_SORTABLES:
+            sortable_items = [
+                f"Page {position + 1} (source {ref.page_index + 1})"
+                for position, ref in enumerate(file_refs)
+            ]
+            token_to_ref = {token: ref for token, ref in zip(sortable_items, file_refs)}
+            with st.expander("Reorder pages (drag and drop)", expanded=False):
+                st.caption("Drag pages into a new order, then apply.")
+                reordered_tokens = sort_items(
+                    sortable_items,
+                    direction="vertical",
+                    key=f"sortable_{workspace_file.file_id}",
+                )
+                if st.button(
+                    "Apply Page Order",
+                    key=f"apply_order_{workspace_file.file_id}",
+                    use_container_width=True,
+                ):
+                    reordered_refs = [token_to_ref[token] for token in reordered_tokens]
+
+                    by_file: dict[str, list[PageRef]] = {
+                        item.file_id: [] for item in st.session_state.workspace_files
+                    }
+                    for page_ref in st.session_state.page_refs:
+                        by_file.setdefault(page_ref.file_id, []).append(page_ref)
+                    by_file[workspace_file.file_id] = reordered_refs
+
+                    rebuilt_refs: list[PageRef] = []
+                    for item in st.session_state.workspace_files:
+                        rebuilt_refs.extend(by_file.get(item.file_id, []))
+
+                    st.session_state.page_refs = rebuilt_refs
+                    st.success("Page order updated.")
+                    st.rerun()
+        else:
+            st.caption("Drag-and-drop reorder is unavailable in this environment.")
+
+        thumbnails_per_row = _auto_thumbnail_columns(len(file_refs))
         cols = st.columns(thumbnails_per_row, gap="small")
         for index, ref in enumerate(file_refs):
             display_page = index + 1
