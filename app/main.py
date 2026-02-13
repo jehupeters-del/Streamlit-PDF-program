@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import html
-import math
 import re
 
 import streamlit as st
@@ -194,39 +193,54 @@ def _render_batch_summary(result: BatchOperationResult, table_key: str) -> None:
             }
         )
 
-    page_size = 10
-    total_rows = len(rows)
-    if total_rows <= page_size:
-        st.dataframe(rows, use_container_width=True)
+    st.dataframe(rows, use_container_width=True)
+
+
+def _render_uploaded_file_list(files: list[tuple[str, bytes]], key_prefix: str) -> None:
+    if not files:
         return
 
-    total_pages = max(1, math.ceil(total_rows / page_size))
-    current_key = f"{table_key}_current_page"
+    page_size = 10
+    total_files = len(files)
+    total_pages = (total_files + page_size - 1) // page_size
+
+    current_key = f"{key_prefix}_upload_page"
     st.session_state.setdefault(current_key, 1)
     current_page = int(st.session_state[current_key])
     if current_page < 1 or current_page > total_pages:
         current_page = 1
         st.session_state[current_key] = 1
 
-    info_col, nav_col = st.columns([3, 2])
-    with info_col:
-        st.caption(f"Showing page {current_page} of {total_pages}")
-    with nav_col:
-        selected_page = st.number_input(
-            "Results page",
-            min_value=1,
-            max_value=total_pages,
-            value=current_page,
-            step=1,
-            key=f"{table_key}_selector",
-        )
-        if int(selected_page) != current_page:
-            st.session_state[current_key] = int(selected_page)
-            st.rerun()
+    if total_pages > 1:
+        info_col, nav_col = st.columns([3, 2])
+        with info_col:
+            st.caption(f"Showing page {current_page} of {total_pages}")
+        with nav_col:
+            selected_page = st.number_input(
+                "Uploaded files page",
+                min_value=1,
+                max_value=total_pages,
+                value=current_page,
+                step=1,
+                key=f"{key_prefix}_upload_page_selector",
+            )
+            if int(selected_page) != current_page:
+                st.session_state[current_key] = int(selected_page)
+                st.rerun()
 
     start = (current_page - 1) * page_size
     end = start + page_size
-    st.dataframe(rows[start:end], use_container_width=True)
+    page_files = files[start:end]
+    st.dataframe(
+        [
+            {
+                "File": name,
+                "Size (MB)": round(len(content) / (1024 * 1024), 2),
+            }
+            for name, content in page_files
+        ],
+        use_container_width=True,
+    )
 
 
 def _workspace_tab(
@@ -445,10 +459,9 @@ def _extraction_tab(
         if st.button("Clear All PDFs", key="clear_extract_batch"):
             st.session_state.extract_batch_uploader_token += 1
             st.rerun()
+        files = [(item.name, item.getvalue()) for item in uploaded_batch] if uploaded_batch else []
+        _render_uploaded_file_list(files, "extract")
         if st.button("Run Batch Extraction"):
-            files = (
-                [(item.name, item.getvalue()) for item in uploaded_batch] if uploaded_batch else []
-            )
             if not files:
                 st.warning("Upload at least one PDF.")
                 return
@@ -521,10 +534,9 @@ def _validation_tab(
         if st.button("Clear All PDFs", key="clear_validate_batch"):
             st.session_state.validate_batch_uploader_token += 1
             st.rerun()
+        files = [(item.name, item.getvalue()) for item in uploaded_batch] if uploaded_batch else []
+        _render_uploaded_file_list(files, "validate")
         if st.button("Run Batch Validation"):
-            files = (
-                [(item.name, item.getvalue()) for item in uploaded_batch] if uploaded_batch else []
-            )
             if not files:
                 st.warning("Upload at least one PDF.")
                 return
@@ -629,21 +641,26 @@ def _regex_extract_tab(
                         use_container_width=True,
                     )
 
-                    for item in result.matches:
-                        st.markdown(f"**Page {item.page_number}** ({item.match_count} matches)")
-                        preview = _thumbnail_bytes(
-                            file_id=f"regex_preview::{uploaded_single.name}",
-                            pdf_bytes=content,
-                            page_index=item.page_number - 1,
-                            zoom=0.72,
-                        )
-                        st.image(preview, use_container_width=True)
-                        highlighted = _highlight_snippet(
-                            item.snippet,
-                            item.matched_text,
-                            case_sensitive,
-                        )
-                        st.markdown(f"Snippet: {highlighted}", unsafe_allow_html=True)
+                    preview_adapter = PyMuPdfAdapter()
+                    preview_columns = st.columns(4, gap="small")
+                    for index, item in enumerate(result.matches):
+                        with preview_columns[index % 4]:
+                            preview = preview_adapter.render_page_thumbnail_with_highlights(
+                                pdf_bytes=content,
+                                page_index=item.page_number - 1,
+                                search_terms=[item.matched_text],
+                                zoom=0.38,
+                            )
+                            st.markdown(
+                                _thumbnail_html(preview, item.page_number),
+                                unsafe_allow_html=True,
+                            )
+                            highlighted = _highlight_snippet(
+                                item.snippet,
+                                item.matched_text,
+                                case_sensitive,
+                            )
+                            st.markdown(highlighted, unsafe_allow_html=True)
                 elif keep_first_page:
                     st.info("No page matched regex. Output includes first page only.")
             except Exception as exc:
@@ -662,10 +679,9 @@ def _regex_extract_tab(
         if st.button("Clear All PDFs", key="clear_regex_batch"):
             st.session_state.regex_batch_uploader_token += 1
             st.rerun()
+        files = [(item.name, item.getvalue()) for item in uploaded_batch] if uploaded_batch else []
+        _render_uploaded_file_list(files, "regex")
         if st.button("Run Batch Regex Extraction", type="primary"):
-            files = (
-                [(item.name, item.getvalue()) for item in uploaded_batch] if uploaded_batch else []
-            )
             if not files:
                 st.warning("Upload at least one PDF.")
                 return

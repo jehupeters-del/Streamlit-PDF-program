@@ -46,6 +46,30 @@ class PyMuPdfAdapter:
         except Exception as exc:
             raise ParsingError("Unable to render page thumbnail") from exc
 
+    def render_page_thumbnail_with_highlights(
+        self,
+        pdf_bytes: bytes,
+        page_index: int,
+        search_terms: list[str],
+        zoom: float = 0.45,
+    ) -> bytes:
+        try:
+            with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
+                page = document[page_index]
+                for term in search_terms:
+                    if not term.strip():
+                        continue
+                    rectangles = page.search_for(term)
+                    for rectangle in rectangles:
+                        annotation = page.add_highlight_annot(rectangle)
+                        if annotation is not None:
+                            annotation.update()
+                matrix = fitz.Matrix(zoom, zoom)
+                pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+                return cast(bytes, pixmap.tobytes("png"))
+        except Exception as exc:
+            raise ParsingError("Unable to render highlighted page thumbnail") from exc
+
     def merge_page_refs(
         self, workspace_files: dict[str, WorkspaceFile], page_refs: list[PageRef]
     ) -> bytes:
