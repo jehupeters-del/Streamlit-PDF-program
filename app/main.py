@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import re
+
 import streamlit as st
 
 from src.adapters.pymupdf_adapter import PyMuPdfAdapter
@@ -20,7 +23,6 @@ def _init_services() -> tuple[
     ExtractionService,
     ValidationService,
     BatchService,
-    PyMuPdfAdapter,
 ]:
     config = AppConfig()
     adapter = PyMuPdfAdapter()
@@ -36,7 +38,6 @@ def _init_services() -> tuple[
         extraction_service,
         validation_service,
         batch_service,
-        adapter,
     )
 
 
@@ -44,6 +45,9 @@ def _init_state() -> None:
     st.session_state.setdefault("workspace_files", [])
     st.session_state.setdefault("page_refs", [])
     st.session_state.setdefault("thumbnail_cache", {})
+    st.session_state.setdefault("merged_signature", "")
+    st.session_state.setdefault("merged_pdf_bytes", b"")
+    st.session_state.setdefault("merged_pdf_name", "merged_output.pdf")
 
 
 def _thumbnail_bytes(file_id: str, pdf_bytes: bytes, page_index: int) -> bytes:
@@ -53,6 +57,61 @@ def _thumbnail_bytes(file_id: str, pdf_bytes: bytes, page_index: int) -> bytes:
         adapter = PyMuPdfAdapter()
         thumbnail_cache[key] = adapter.render_page_thumbnail(pdf_bytes, page_index, zoom=0.38)
     return thumbnail_cache[key]
+
+
+def _thumbnail_html(image_bytes: bytes, page_number: int) -> str:
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    return (
+        "<div style='border:1px solid rgba(120,120,120,0.35);"
+        " border-radius:10px;padding:8px;background:rgba(250,250,250,0.75);'>"
+        "<div style='text-align:center;font-size:0.85rem;"
+        f"font-weight:600;margin-bottom:6px;'>Page {page_number}</div>"
+        "<div style='display:flex;justify-content:center;'>"
+        f"<img src='data:image/png;base64,{encoded}' "
+        "style='width:100%;height:auto;border-radius:6px;'/>"
+        "</div>"
+        "</div>"
+    )
+
+
+def _parse_page_range_spec(spec: str, max_page: int) -> tuple[list[int], str | None]:
+    cleaned = spec.strip()
+    if not cleaned:
+        return [], "Enter one or more page numbers or ranges."
+
+    pages: set[int] = set()
+    parts = [part.strip() for part in cleaned.split(",") if part.strip()]
+    if not parts:
+        return [], "Enter one or more page numbers or ranges."
+
+    for part in parts:
+        if re.fullmatch(r"\d+", part):
+            page = int(part)
+            if page < 1 or page > max_page:
+                return [], f"Page {page} is out of range (1-{max_page})."
+            pages.add(page)
+            continue
+
+        range_match = re.fullmatch(r"(\d+)\s*-\s*(\d+)", part)
+        if range_match:
+            start = int(range_match.group(1))
+            end = int(range_match.group(2))
+            if start > end:
+                return [], f"Invalid range '{part}'. Start must be <= end."
+            if start < 1 or end > max_page:
+                return [], f"Range '{part}' is out of range (1-{max_page})."
+            pages.update(range(start, end + 1))
+            continue
+
+        return [], f"Invalid token '{part}'. Use formats like 1,3,5-7."
+
+    return sorted(pages), None
+
+
+def _merge_signature(workspace_files: list[WorkspaceFile], page_refs: list[PageRef]) -> str:
+    file_sig = "|".join(item.file_id for item in workspace_files)
+    page_sig = "|".join(f"{item.file_id}:{item.page_index}" for item in page_refs)
+    return f"{file_sig}::{page_sig}"
 
 
 def _file_map(files: list[WorkspaceFile]) -> dict[str, WorkspaceFile]:
@@ -139,6 +198,14 @@ def _workspace_tab(
             f"{config.max_batch_size_mb} MB per batch"
         )
 
+    thumbnails_per_row = st.slider(
+        "Thumbnails per row",
+        min_value=2,
+        max_value=8,
+        value=4,
+        key="thumbs_per_row",
+    )
+
     workspace_files: list[WorkspaceFile] = st.session_state.workspace_files
     page_refs: list[PageRef] = st.session_state.page_refs
 
@@ -148,7 +215,7 @@ def _workspace_tab(
 
     retained_counts = _retained_page_counts(page_refs)
 
-    st.write("### Pages (all loaded PDFs)")
+    st.subheader("Pages (all loaded PDFs)", anchor=False)
     for workspace_file in workspace_files:
         file_refs = sorted(
             [ref for ref in page_refs if ref.file_id == workspace_file.file_id],
@@ -181,18 +248,20 @@ def _workspace_tab(
             st.divider()
             continue
 
-        cols = st.columns(5, gap="small")
+        cols = st.columns(thumbnails_per_row, gap="small")
         for index, ref in enumerate(file_refs):
-            with cols[index % 5]:
+            display_page = index + 1
+            with cols[index % thumbnails_per_row]:
                 thumbnail = _thumbnail_bytes(
                     workspace_file.file_id,
                     workspace_file.content,
                     ref.page_index,
                 )
-                st.image(thumbnail, caption=f"Page {ref.page_index + 1}", width=125)
+                st.markdown(_thumbnail_html(thumbnail, display_page), unsafe_allow_html=True)
                 if st.button(
-                    f"Remove Page {ref.page_index + 1}",
+                    f"Remove Page {display_page}",
                     key=f"remove_single_{workspace_file.file_id}_{ref.page_index}",
+                    use_container_width=True,
                 ):
                     st.session_state.page_refs = workspace_service.remove_single_page(
                         st.session_state.page_refs,
@@ -201,42 +270,60 @@ def _workspace_tab(
                     )
                     st.rerun()
 
-        page_choices = [ref.page_index + 1 for ref in file_refs]
         with st.form(key=f"remove_multi_form_{workspace_file.file_id}"):
-            selected_to_remove = st.multiselect(
+            page_spec = st.text_input(
                 "Select multiple pages to remove",
-                options=page_choices,
-                key=f"multi_select_{workspace_file.file_id}",
+                placeholder="Examples: 1,3,5-8",
+                key=f"multi_select_text_{workspace_file.file_id}",
             )
+            st.caption("Type pages and ranges using current page numbers (e.g., 1,3,5-8).")
             submit = st.form_submit_button("Remove Selected Pages")
             if submit:
-                zero_based = [value - 1 for value in selected_to_remove]
-                st.session_state.page_refs = workspace_service.remove_multiple_pages(
-                    st.session_state.page_refs,
-                    workspace_file.file_id,
-                    zero_based,
-                )
-                st.success(f"Removed {len(zero_based)} page(s).")
-                st.rerun()
+                selected_pages, error = _parse_page_range_spec(page_spec, len(file_refs))
+                if error:
+                    st.error(error)
+                else:
+                    selected_refs = [file_refs[page - 1] for page in selected_pages]
+                    page_indices = [item.page_index for item in selected_refs]
+                    st.session_state.page_refs = workspace_service.remove_multiple_pages(
+                        st.session_state.page_refs,
+                        workspace_file.file_id,
+                        page_indices,
+                    )
+                    st.success(f"Removed {len(page_indices)} page(s).")
+                    st.rerun()
         st.divider()
 
     total_pages = len(st.session_state.page_refs)
     st.write(f"Total retained pages across workspace: {total_pages}")
 
-    if st.button("Merge & Download PDF", disabled=total_pages == 0):
+    if total_pages > 0:
         try:
-            result = merge_service.merge(
-                st.session_state.workspace_files, st.session_state.page_refs
+            current_signature = _merge_signature(
+                st.session_state.workspace_files,
+                st.session_state.page_refs,
             )
+            if st.session_state.merged_signature != current_signature:
+                result = merge_service.merge(
+                    st.session_state.workspace_files,
+                    st.session_state.page_refs,
+                )
+                st.session_state.merged_signature = current_signature
+                st.session_state.merged_pdf_bytes = result.output_pdf
+                st.session_state.merged_pdf_name = result.output_name
+
             st.download_button(
-                "Download Merged PDF",
-                data=result.output_pdf,
-                file_name=result.output_name,
+                "Merge & Download PDF",
+                data=st.session_state.merged_pdf_bytes,
+                file_name=st.session_state.merged_pdf_name,
                 mime="application/pdf",
+                type="primary",
+                use_container_width=True,
             )
-            st.success(f"Merge complete ({result.merged_pages} page(s)).")
         except Exception as exc:
             st.error(str(exc))
+    else:
+        st.button("Merge & Download PDF", disabled=True, use_container_width=True)
 
 
 def _extraction_tab(
@@ -407,7 +494,7 @@ def _validation_tab(
 
 def main() -> None:
     st.set_page_config(page_title="PDF Suite Core", layout="wide")
-    st.title("PDF Suite Core — Streamlit Rebuild")
+    st.title("PDF Suite Core — Streamlit Rebuild", anchor=False)
 
     (
         config,
@@ -416,7 +503,6 @@ def main() -> None:
         extraction_service,
         validation_service,
         batch_service,
-        adapter,
     ) = _init_services()
     _init_state()
 
